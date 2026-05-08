@@ -16,38 +16,76 @@ import requests
 
 DEX_BASE = "https://api.dexscreener.com"
 TG_BASE = "https://api.telegram.org"
-ETHERSCAN_V2_BASE = "https://api.etherscan.io/v2/api"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
+PROJECT_NAME = os.getenv("PROJECT_NAME", "IRVUS")
+
 CHAIN = os.getenv("CHAIN", "base")
-CHAIN_ID = int(os.getenv("CHAIN_ID", "8453"))
+BASE_RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
 
 TOKEN_ADDRESS = os.getenv("TOKEN_ADDRESS", "").lower()
 PAIR_ADDRESS = os.getenv("PAIR_ADDRESS", "").lower()
 
-ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
-
-PROJECT_NAME = os.getenv("PROJECT_NAME", "IRVUS")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "15"))
 MIN_BUY_ALERT_USD = float(os.getenv("MIN_BUY_ALERT_USD", "25"))
-
 TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "18"))
+
+BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "30"))
+
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-logger = logging.getLogger("irvus-buy-bot")
+logger = logging.getLogger("irvus-buybot-rpc")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "IRVUS-BUY-BOT/2.0"})
+session.headers.update({"User-Agent": "IRVUS-BUYBOT-RPC/1.0"})
 
 seen_hashes: Set[str] = set()
-first_run = True
 cached_pair: Optional[Dict[str, Any]] = None
+last_checked_block: Optional[int] = None
+
+
+def rpc_call(method: str, params: list[Any]) -> Any:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": int(time.time() * 1000),
+        "method": method,
+        "params": params,
+    }
+
+    r = session.post(BASE_RPC_URL, json=payload, timeout=30)
+    r.raise_for_status()
+
+    data = r.json()
+
+    if "error" in data:
+        raise RuntimeError(data["error"])
+
+    return data.get("result")
+
+
+def hex_to_int(value: str) -> int:
+    return int(value, 16)
+
+
+def int_to_hex(value: int) -> str:
+    return hex(value)
+
+
+def normalize_topic_address(topic: str) -> str:
+    return "0x" + topic[-40:].lower()
+
+
+def address_to_topic(address: str) -> str:
+    clean = address.lower().replace("0x", "")
+    return "0x" + clean.rjust(64, "0")
 
 
 def fmt_money(v: Optional[float]) -> str:
@@ -90,6 +128,11 @@ def send_telegram(text: str) -> None:
 
     r = session.post(url, json=payload, timeout=20)
     r.raise_for_status()
+
+
+def get_latest_block() -> int:
+    result = rpc_call("eth_blockNumber", [])
+    return hex_to_int(result)
 
 
 def get_token_pairs() -> List[Dict[str, Any]]:
@@ -166,125 +209,81 @@ def get_pair() -> Dict[str, Any]:
 def refresh_pair(pair_address: str) -> Dict[str, Any]:
     pair = get_pair_by_address(pair_address)
     if not pair:
-        raise ValueError("Pair refresh edilemedi.")
+        logger.warning("Pair refresh edilemedi, cached pair kullanılacak.")
+        return cached_pair or get_pair()
     return pair
 
 
-def get_holder_count() -> Optional[int]:
+def get_transfer_logs(from_block: int, to_block: int, pair_address: str) -> List[Dict[str, Any]]:
     params = {
-        "chainid": CHAIN_ID,
-        "module": "token",
-        "action": "tokenholdercount",
-        "contractaddress": TOKEN_ADDRESS,
-        "apikey": ETHERSCAN_API_KEY,
+        "fromBlock": int_to_hex(from_block),
+        "toBlock": int_to_hex(to_block),
+        "address": TOKEN_ADDRESS,
+        "topics": [
+            TRANSFER_TOPIC,
+            address_to_topic(pair_address),
+        ],
     }
 
-    try:
-        r = session.get(ETHERSCAN_V2_BASE, params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-
-        if str(data.get("status")) == "1":
-            return int(data.get("result"))
-
-    except Exception as e:
-        logger.warning("Holder count alınamadı: %s", e)
-
-    return None
-
-
-def get_wallet_token_balance(wallet: str) -> Optional[float]:
-    params = {
-        "chainid": CHAIN_ID,
-        "module": "account",
-        "action": "tokenbalance",
-        "contractaddress": TOKEN_ADDRESS,
-        "address": wallet,
-        "tag": "latest",
-        "apikey": ETHERSCAN_API_KEY,
-    }
-
-    try:
-        r = session.get(ETHERSCAN_V2_BASE, params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-
-        result = data.get("result")
-
-        if result is None:
-            return None
-
-        raw = float(result)
-
-        return raw / (10 ** TOKEN_DECIMALS)
-
-    except Exception as e:
-        logger.warning("Wallet balance alınamadı: %s", e)
-
-    return None
-
-
-def get_latest_token_transfers(limit: int = 20) -> List[Dict[str, Any]]:
-    params = {
-        "chainid": CHAIN_ID,
-        "module": "account",
-        "action": "tokentx",
-        "contractaddress": TOKEN_ADDRESS,
-        "page": 1,
-        "offset": limit,
-        "sort": "desc",
-        "apikey": ETHERSCAN_API_KEY,
-    }
-
-    r = session.get(ETHERSCAN_V2_BASE, params=params, timeout=20)
-    r.raise_for_status()
-
-    data = r.json()
-
-    result = data.get("result")
+    result = rpc_call("eth_getLogs", [params])
 
     if not isinstance(result, list):
-        logger.warning("tokentx beklenen liste dönmedi: %s", data)
         return []
 
     return result
 
 
-def is_buy_transfer(tx: Dict[str, Any], pair_address: str) -> bool:
-    from_addr = str(tx.get("from", "")).lower()
-    to_addr = str(tx.get("to", "")).lower()
+def decode_transfer_log(log: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    topics = log.get("topics") or []
 
-    if from_addr != pair_address.lower():
-        return False
+    if len(topics) < 3:
+        return None
 
-    if not to_addr:
-        return False
+    from_addr = normalize_topic_address(topics[1])
+    to_addr = normalize_topic_address(topics[2])
 
-    if to_addr in {
-        "0x0000000000000000000000000000000000000000",
-        "0x000000000000000000000000000000000000dead",
-    }:
-        return False
+    raw_value_hex = log.get("data", "0x0")
+    raw_value = hex_to_int(raw_value_hex)
 
-    return True
+    token_amount = raw_value / (10 ** TOKEN_DECIMALS)
+
+    tx_hash = log.get("transactionHash", "")
+
+    return {
+        "tx_hash": tx_hash,
+        "from": from_addr,
+        "to": to_addr,
+        "token_amount": token_amount,
+        "block_number": hex_to_int(log.get("blockNumber", "0x0")),
+    }
 
 
-def token_amount_from_transfer(tx: Dict[str, Any]) -> float:
-    raw_value = float(tx.get("value") or 0)
+def get_wallet_token_balance(wallet: str) -> Optional[float]:
+    selector = "0x70a08231"
+    wallet_clean = wallet.lower().replace("0x", "").rjust(64, "0")
+    data = selector + wallet_clean
 
-    decimals = tx.get("tokenDecimal")
+    call_obj = {
+        "to": TOKEN_ADDRESS,
+        "data": data,
+    }
 
     try:
-        decimals_int = int(decimals)
-    except Exception:
-        decimals_int = TOKEN_DECIMALS
+        result = rpc_call("eth_call", [call_obj, "latest"])
+        raw = hex_to_int(result)
+        return raw / (10 ** TOKEN_DECIMALS)
+    except Exception as e:
+        logger.warning("Wallet balance alınamadı: %s", e)
+        return None
 
-    return raw_value / (10 ** decimals_int)
+
+def get_holder_count_safe() -> Optional[int]:
+    return None
 
 
 def build_message(
     pair: Dict[str, Any],
-    tx: Dict[str, Any],
+    transfer: Dict[str, Any],
     holders: Optional[int],
     wallet_balance: Optional[float],
 ) -> str:
@@ -292,7 +291,7 @@ def build_message(
     quote = pair.get("quoteToken") or {}
 
     base_symbol = base.get("symbol", PROJECT_NAME)
-    quote_symbol = quote.get("symbol", "QUOTE")
+    quote_symbol = quote.get("symbol", "ETH")
 
     dex_id = pair.get("dexId", "DEX")
     chart_url = pair.get("url", "")
@@ -304,10 +303,9 @@ def build_message(
     market_cap = pair.get("marketCap")
     fdv = pair.get("fdv")
 
-    tx_hash = tx.get("hash", "")
-    buyer = tx.get("to", "")
-
-    token_amount = token_amount_from_transfer(tx)
+    tx_hash = transfer.get("tx_hash", "")
+    buyer = transfer.get("to", "")
+    token_amount = float(transfer.get("token_amount") or 0)
 
     usd_value = token_amount * price_usd if price_usd > 0 else None
     quote_amount = token_amount * price_native if price_native > 0 else None
@@ -322,7 +320,7 @@ def build_message(
     lines.append("")
     lines.append("✅ New Buy Detected")
     lines.append("")
-    
+
     if quote_amount is not None:
         lines.append(
             f"💵 Spent: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
@@ -348,6 +346,8 @@ def build_message(
 
     if holders is not None:
         lines.append(f"👥 Holders: {holders:,}")
+    else:
+        lines.append("👥 Holders: n/a")
 
     if liquidity_usd is not None:
         lines.append(f"💧 Liquidity: {fmt_money(float(liquidity_usd))}")
@@ -368,14 +368,14 @@ def build_message(
 
 
 def main() -> None:
-    global first_run
+    global last_checked_block, cached_pair
 
-    logger.info("IRVUS BUY BOT başladı.")
+    logger.info("IRVUS BUY BOT RPC başladı.")
 
     if not TOKEN_ADDRESS:
         raise ValueError("TOKEN_ADDRESS boş.")
-    if not ETHERSCAN_API_KEY:
-        raise ValueError("ETHERSCAN_API_KEY boş.")
+    if not BASE_RPC_URL:
+        raise ValueError("BASE_RPC_URL boş.")
 
     pair = get_pair()
     pair_address = str(pair.get("pairAddress") or "").lower()
@@ -385,37 +385,47 @@ def main() -> None:
 
     logger.info("İzlenen pair: %s", pair_address)
 
+    latest_block = get_latest_block()
+    last_checked_block = max(latest_block - BLOCK_LOOKBACK, 0)
+
+    logger.info("Başlangıç block: %s", last_checked_block)
+
     while True:
         try:
+            latest_block = get_latest_block()
+
+            from_block = (last_checked_block or latest_block) + 1
+            to_block = latest_block
+
+            if from_block > to_block:
+                time.sleep(CHECK_INTERVAL)
+                continue
+
             pair = refresh_pair(pair_address)
+            cached_pair = pair
 
-            transfers = get_latest_token_transfers(limit=30)
+            logs = get_transfer_logs(
+                from_block=from_block,
+                to_block=to_block,
+                pair_address=pair_address,
+            )
 
-            buy_transfers = [
-                tx for tx in transfers
-                if is_buy_transfer(tx, pair_address)
-            ]
+            holders = get_holder_count_safe()
 
-            buy_transfers = list(reversed(buy_transfers))
+            for log in logs:
+                transfer = decode_transfer_log(log)
 
-            holders = get_holder_count()
-
-            for tx in buy_transfers:
-                tx_hash = tx.get("hash")
-
-                if not tx_hash:
+                if not transfer:
                     continue
 
-                if tx_hash in seen_hashes:
+                tx_hash = transfer["tx_hash"]
+
+                if not tx_hash or tx_hash in seen_hashes:
                     continue
 
                 seen_hashes.add(tx_hash)
 
-                if first_run:
-                    continue
-
-                buyer = tx.get("to", "")
-                token_amount = token_amount_from_transfer(tx)
+                token_amount = float(transfer.get("token_amount") or 0)
                 price_usd = float(pair.get("priceUsd") or 0)
                 usd_value = token_amount * price_usd
 
@@ -427,13 +437,12 @@ def main() -> None:
                     )
                     continue
 
-                wallet_balance = None
-                if buyer:
-                    wallet_balance = get_wallet_token_balance(buyer)
+                buyer = transfer.get("to", "")
+                wallet_balance = get_wallet_token_balance(buyer) if buyer else None
 
                 msg = build_message(
                     pair=pair,
-                    tx=tx,
+                    transfer=transfer,
                     holders=holders,
                     wallet_balance=wallet_balance,
                 )
@@ -442,7 +451,7 @@ def main() -> None:
 
                 logger.info("BUY alert gönderildi: %s", tx_hash)
 
-            first_run = False
+            last_checked_block = to_block
 
             if len(seen_hashes) > 5000:
                 seen_hashes.clear()
