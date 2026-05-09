@@ -409,6 +409,12 @@ def main() -> None:
                 to_block=to_block,
                 pair_address=pair_address,
             )
+            logger.info(
+    "Block kontrol: %s -> %s | bulunan log: %s",
+    from_block,
+    to_block,
+    len(logs),
+)
 
             holders = get_holder_count_safe()
 
