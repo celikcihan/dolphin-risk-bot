@@ -1,8 +1,6 @@
+```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "300"))
-last_price_refresh = 0.0
 
 from __future__ import annotations
 
@@ -31,11 +29,12 @@ BASE_RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
 TOKEN_ADDRESS = os.getenv("TOKEN_ADDRESS", "").lower()
 PAIR_ADDRESS = os.getenv("PAIR_ADDRESS", "").lower()
 
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "15"))
-MIN_BUY_ALERT_USD = float(os.getenv("MIN_BUY_ALERT_USD", "25"))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
+MIN_BUY_ALERT_USD = float(os.getenv("MIN_BUY_ALERT_USD", "1"))
 TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "18"))
 
 BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "30"))
+PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "300"))
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
@@ -53,6 +52,7 @@ session.headers.update({"User-Agent": "IRVUS-BUYBOT-RPC/1.0"})
 seen_hashes: Set[str] = set()
 cached_pair: Optional[Dict[str, Any]] = None
 last_checked_block: Optional[int] = None
+last_price_refresh = 0.0
 
 
 def rpc_call(method: str, params: list[Any]) -> Any:
@@ -94,33 +94,34 @@ def address_to_topic(address: str) -> str:
 def fmt_money(v: Optional[float]) -> str:
     if v is None:
         return "n/a"
+
     if abs(v) >= 1:
         return f"${v:,.2f}"
+
     return f"${v:.10f}"
 
 
 def fmt_number(v: Optional[float]) -> str:
     if v is None:
         return "n/a"
+
     if abs(v) >= 1_000_000:
         return f"{v:,.0f}"
+
     if abs(v) >= 1_000:
         return f"{v:,.2f}"
+
     return f"{v:,.6f}"
 
 
 def short_wallet(addr: str) -> str:
     if not addr:
         return "n/a"
+
     return f"{addr[:6]}...{addr[-4:]}"
 
 
 def send_telegram(text: str) -> None:
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN boş.")
-    if not CHANNEL_ID:
-        raise ValueError("CHANNEL_ID boş.")
-
     url = f"{TG_BASE}/bot{BOT_TOKEN}/sendMessage"
 
     payload = {
@@ -169,11 +170,12 @@ def get_pair_by_address(pair_address: str) -> Optional[Dict[str, Any]]:
 
 def choose_best_pair(pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not pairs:
-        raise ValueError("Token için DexScreener pair bulunamadı.")
+        raise ValueError("Pair bulunamadı.")
 
     def score(p: Dict[str, Any]) -> float:
         liq = float((p.get("liquidity") or {}).get("usd") or 0)
         vol = float((p.get("volume") or {}).get("h24") or 0)
+
         return liq * 1000 + vol
 
     return sorted(pairs, key=score, reverse=True)[0]
@@ -185,16 +187,8 @@ def get_pair() -> Dict[str, Any]:
     if cached_pair:
         return cached_pair
 
-    if PAIR_ADDRESS:
-        pair = get_pair_by_address(PAIR_ADDRESS)
-        if pair:
-            cached_pair = pair
-            logger.info("Pair env ile bulundu: %s", PAIR_ADDRESS)
-            return pair
-
-        logger.warning("PAIR_ADDRESS ile pair bulunamadı, token üzerinden aranacak.")
-
     pairs = get_token_pairs()
+
     pair = choose_best_pair(pairs)
 
     cached_pair = pair
@@ -210,7 +204,8 @@ def get_pair() -> Dict[str, Any]:
 
 
 def refresh_pair(pair_address: str) -> Dict[str, Any]:
-    global cached_pair, last_price_refresh
+    global cached_pair
+    global last_price_refresh
 
     now = time.time()
 
@@ -219,23 +214,35 @@ def refresh_pair(pair_address: str) -> Dict[str, Any]:
 
     try:
         pair = get_pair_by_address(pair_address)
+
         if pair:
             cached_pair = pair
             last_price_refresh = now
+
             logger.info("Pair price yenilendi.")
+
             return pair
+
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 429:
             logger.warning("DexScreener rate limit yedi. Cached pair kullanılacak.")
+
             if cached_pair:
                 return cached_pair
+
         raise
 
-    logger.warning("Pair refresh edilemedi, cached pair kullanılacak.")
+    logger.warning("Pair refresh edilemedi. Cached pair kullanılacak.")
+
     return cached_pair or get_pair()
 
 
-def get_transfer_logs(from_block: int, to_block: int, pair_address: str) -> List[Dict[str, Any]]:
+def get_transfer_logs(
+    from_block: int,
+    to_block: int,
+    pair_address: str,
+) -> List[Dict[str, Any]]:
+
     params = {
         "fromBlock": int_to_hex(from_block),
         "toBlock": int_to_hex(to_block),
@@ -275,13 +282,14 @@ def decode_transfer_log(log: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "from": from_addr,
         "to": to_addr,
         "token_amount": token_amount,
-        "block_number": hex_to_int(log.get("blockNumber", "0x0")),
     }
 
 
 def get_wallet_token_balance(wallet: str) -> Optional[float]:
     selector = "0x70a08231"
+
     wallet_clean = wallet.lower().replace("0x", "").rjust(64, "0")
+
     data = selector + wallet_clean
 
     call_obj = {
@@ -291,23 +299,23 @@ def get_wallet_token_balance(wallet: str) -> Optional[float]:
 
     try:
         result = rpc_call("eth_call", [call_obj, "latest"])
+
         raw = hex_to_int(result)
+
         return raw / (10 ** TOKEN_DECIMALS)
+
     except Exception as e:
         logger.warning("Wallet balance alınamadı: %s", e)
+
         return None
-
-
-def get_holder_count_safe() -> Optional[int]:
-    return None
 
 
 def build_message(
     pair: Dict[str, Any],
     transfer: Dict[str, Any],
-    holders: Optional[int],
     wallet_balance: Optional[float],
 ) -> str:
+
     base = pair.get("baseToken") or {}
     quote = pair.get("quoteToken") or {}
 
@@ -322,17 +330,18 @@ def build_message(
 
     liquidity_usd = (pair.get("liquidity") or {}).get("usd")
     market_cap = pair.get("marketCap")
-    fdv = pair.get("fdv")
 
     tx_hash = transfer.get("tx_hash", "")
     buyer = transfer.get("to", "")
+
     token_amount = float(transfer.get("token_amount") or 0)
 
-    usd_value = token_amount * price_usd if price_usd > 0 else None
-    quote_amount = token_amount * price_native if price_native > 0 else None
+    usd_value = token_amount * price_usd if price_usd > 0 else 0
+    quote_amount = token_amount * price_native if price_native > 0 else 0
 
     wallet_value = None
-    if wallet_balance is not None and price_usd > 0:
+
+    if wallet_balance is not None:
         wallet_value = wallet_balance * price_usd
 
     lines: List[str] = []
@@ -341,42 +350,29 @@ def build_message(
     lines.append("")
     lines.append("✅ New Buy Detected")
     lines.append("")
-
-    if quote_amount is not None:
-        lines.append(
-            f"💵 Spent: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
-        )
-    else:
-        lines.append(f"💵 Spent: {fmt_money(usd_value)}")
-
-    lines.append(f"🪙 Got: {fmt_number(token_amount)} {base_symbol}")
+    lines.append(
+        f"💵 Spent: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
+    )
+    lines.append(
+        f"🪙 Got: {fmt_number(token_amount)} {base_symbol}"
+    )
     lines.append("")
-    lines.append(f"📈 Buy Price: {fmt_money(price_usd)}")
+    lines.append(
+        f"📈 Buy Price: {fmt_money(price_usd)}"
+    )
 
     if wallet_balance is not None:
-        if wallet_value is not None:
-            lines.append(
-                f"👤 Wallet Holdings: {fmt_number(wallet_balance)} {base_symbol} ({fmt_money(wallet_value)})"
-            )
-        else:
-            lines.append(
-                f"👤 Wallet Holdings: {fmt_number(wallet_balance)} {base_symbol}"
-            )
+        lines.append(
+            f"👤 Wallet Holdings: {fmt_number(wallet_balance)} {base_symbol} ({fmt_money(wallet_value)})"
+        )
 
     lines.append(f"🏪 DEX: {dex_id}")
-
-    if holders is not None:
-        lines.append(f"👥 Holders: {holders:,}")
-    else:
-        lines.append("👥 Holders: n/a")
 
     if liquidity_usd is not None:
         lines.append(f"💧 Liquidity: {fmt_money(float(liquidity_usd))}")
 
     if market_cap is not None:
         lines.append(f"🏦 Market Cap: {fmt_money(float(market_cap))}")
-    elif fdv is not None:
-        lines.append(f"📊 FDV: {fmt_money(float(fdv))}")
 
     lines.append("")
     lines.append(f"👛 Buyer: {short_wallet(buyer)}")
@@ -389,42 +385,47 @@ def build_message(
 
 
 def main() -> None:
-    global last_checked_block, cached_pair
+    global last_checked_block
+    global cached_pair
+    global last_price_refresh
 
     logger.info("IRVUS BUY BOT RPC başladı.")
 
-    if not TOKEN_ADDRESS:
-        raise ValueError("TOKEN_ADDRESS boş.")
-    if not BASE_RPC_URL:
-        raise ValueError("BASE_RPC_URL boş.")
-
     pair = get_pair()
-    pair_address = str(pair.get("pairAddress") or "").lower()
-    global last_price_refresh
-last_price_refresh = time.time()
 
-    if not pair_address:
-        raise ValueError("Pair address alınamadı.")
+    pair_address = str(pair.get("pairAddress") or "").lower()
+
+    last_price_refresh = time.time()
 
     logger.info("İzlenen pair: %s", pair_address)
 
     latest_block = get_latest_block()
+
     last_checked_block = max(latest_block - BLOCK_LOOKBACK, 0)
 
     logger.info("Başlangıç block: %s", last_checked_block)
 
     while True:
         try:
+
             latest_block = get_latest_block()
 
             from_block = (last_checked_block or latest_block) + 1
             to_block = latest_block
+
+            logger.info(
+                "Loop çalışıyor | latest_block=%s | from_block=%s | to_block=%s",
+                latest_block,
+                from_block,
+                to_block,
+            )
 
             if from_block > to_block:
                 time.sleep(CHECK_INTERVAL)
                 continue
 
             pair = refresh_pair(pair_address)
+
             cached_pair = pair
 
             logs = get_transfer_logs(
@@ -432,16 +433,16 @@ last_price_refresh = time.time()
                 to_block=to_block,
                 pair_address=pair_address,
             )
-            logger.info(
-    "Block kontrol: %s -> %s | bulunan log: %s",
-    from_block,
-    to_block,
-    len(logs),
-)
 
-            holders = get_holder_count_safe()
+            logger.info(
+                "Block kontrol: %s -> %s | bulunan log: %s",
+                from_block,
+                to_block,
+                len(logs),
+            )
 
             for log in logs:
+
                 transfer = decode_transfer_log(log)
 
                 if not transfer:
@@ -449,36 +450,46 @@ last_price_refresh = time.time()
 
                 tx_hash = transfer["tx_hash"]
 
-                if not tx_hash or tx_hash in seen_hashes:
+                if not tx_hash:
+                    continue
+
+                if tx_hash in seen_hashes:
                     continue
 
                 seen_hashes.add(tx_hash)
 
                 token_amount = float(transfer.get("token_amount") or 0)
+
                 price_usd = float(pair.get("priceUsd") or 0)
+
                 usd_value = token_amount * price_usd
 
                 if usd_value < MIN_BUY_ALERT_USD:
                     logger.info(
-                        "Buy küçük olduğu için geçildi: %s | %s",
+                        "Buy küçük geçti: %s",
                         fmt_money(usd_value),
-                        tx_hash,
                     )
                     continue
 
                 buyer = transfer.get("to", "")
-                wallet_balance = get_wallet_token_balance(buyer) if buyer else None
+
+                wallet_balance = None
+
+                if buyer:
+                    wallet_balance = get_wallet_token_balance(buyer)
 
                 msg = build_message(
                     pair=pair,
                     transfer=transfer,
-                    holders=holders,
                     wallet_balance=wallet_balance,
                 )
 
                 send_telegram(msg)
 
-                logger.info("BUY alert gönderildi: %s", tx_hash)
+                logger.info(
+                    "BUY alert gönderildi: %s",
+                    tx_hash,
+                )
 
             last_checked_block = to_block
 
@@ -493,3 +504,4 @@ last_price_refresh = time.time()
 
 if __name__ == "__main__":
     main()
+```
