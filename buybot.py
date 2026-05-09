@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "300"))
+last_price_refresh = 0.0
+
 from __future__ import annotations
 
 from dotenv import load_dotenv
@@ -207,11 +210,29 @@ def get_pair() -> Dict[str, Any]:
 
 
 def refresh_pair(pair_address: str) -> Dict[str, Any]:
-    pair = get_pair_by_address(pair_address)
-    if not pair:
-        logger.warning("Pair refresh edilemedi, cached pair kullanılacak.")
-        return cached_pair or get_pair()
-    return pair
+    global cached_pair, last_price_refresh
+
+    now = time.time()
+
+    if cached_pair and (now - last_price_refresh < PRICE_REFRESH_SECONDS):
+        return cached_pair
+
+    try:
+        pair = get_pair_by_address(pair_address)
+        if pair:
+            cached_pair = pair
+            last_price_refresh = now
+            logger.info("Pair price yenilendi.")
+            return pair
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 429:
+            logger.warning("DexScreener rate limit yedi. Cached pair kullanılacak.")
+            if cached_pair:
+                return cached_pair
+        raise
+
+    logger.warning("Pair refresh edilemedi, cached pair kullanılacak.")
+    return cached_pair or get_pair()
 
 
 def get_transfer_logs(from_block: int, to_block: int, pair_address: str) -> List[Dict[str, Any]]:
@@ -379,6 +400,8 @@ def main() -> None:
 
     pair = get_pair()
     pair_address = str(pair.get("pairAddress") or "").lower()
+    global last_price_refresh
+last_price_refresh = time.time()
 
     if not pair_address:
         raise ValueError("Pair address alınamadı.")
