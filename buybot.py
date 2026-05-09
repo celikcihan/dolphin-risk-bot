@@ -19,6 +19,7 @@ TG_BASE = "https://api.telegram.org"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
+SELL_CHANNEL_ID = os.getenv("SELL_CHANNEL_ID", CHANNEL_ID)
 
 PROJECT_NAME = os.getenv("PROJECT_NAME", "IRVUS")
 
@@ -26,10 +27,10 @@ CHAIN = os.getenv("CHAIN", "base")
 BASE_RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
 
 TOKEN_ADDRESS = os.getenv("TOKEN_ADDRESS", "").lower()
-PAIR_ADDRESS = os.getenv("PAIR_ADDRESS", "").lower()
 
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
 MIN_BUY_ALERT_USD = float(os.getenv("MIN_BUY_ALERT_USD", "1"))
+MIN_SELL_ALERT_USD = float(os.getenv("MIN_SELL_ALERT_USD", "1"))
 TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "18"))
 
 BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "30"))
@@ -43,10 +44,10 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-logger = logging.getLogger("irvus-buybot-rpc")
+logger = logging.getLogger("irvus-buy-sell-bot")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "IRVUS-BUYBOT-RPC/1.0"})
+session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/1.0"})
 
 seen_hashes: Set[str] = set()
 cached_pair: Optional[Dict[str, Any]] = None
@@ -93,38 +94,32 @@ def address_to_topic(address: str) -> str:
 def fmt_money(v: Optional[float]) -> str:
     if v is None:
         return "n/a"
-
     if abs(v) >= 1:
         return f"${v:,.2f}"
-
     return f"${v:.10f}"
 
 
 def fmt_number(v: Optional[float]) -> str:
     if v is None:
         return "n/a"
-
     if abs(v) >= 1_000_000:
         return f"{v:,.0f}"
-
     if abs(v) >= 1_000:
         return f"{v:,.2f}"
-
     return f"{v:,.6f}"
 
 
 def short_wallet(addr: str) -> str:
     if not addr:
         return "n/a"
-
     return f"{addr[:6]}...{addr[-4:]}"
 
 
-def send_telegram(text: str) -> None:
+def send_telegram(text: str, chat_id: str) -> None:
     url = f"{TG_BASE}/bot{BOT_TOKEN}/sendMessage"
 
     payload = {
-        "chat_id": CHANNEL_ID,
+        "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": True,
     }
@@ -174,7 +169,6 @@ def choose_best_pair(pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
     def score(p: Dict[str, Any]) -> float:
         liq = float((p.get("liquidity") or {}).get("usd") or 0)
         vol = float((p.get("volume") or {}).get("h24") or 0)
-
         return liq * 1000 + vol
 
     return sorted(pairs, key=score, reverse=True)[0]
@@ -187,9 +181,7 @@ def get_pair() -> Dict[str, Any]:
         return cached_pair
 
     pairs = get_token_pairs()
-
     pair = choose_best_pair(pairs)
-
     cached_pair = pair
 
     logger.info(
@@ -217,22 +209,17 @@ def refresh_pair(pair_address: str) -> Dict[str, Any]:
         if pair:
             cached_pair = pair
             last_price_refresh = now
-
             logger.info("Pair price yenilendi.")
-
             return pair
 
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 429:
             logger.warning("DexScreener rate limit yedi. Cached pair kullanılacak.")
-
             if cached_pair:
                 return cached_pair
-
         raise
 
     logger.warning("Pair refresh edilemedi. Cached pair kullanılacak.")
-
     return cached_pair or get_pair()
 
 
@@ -240,16 +227,28 @@ def get_transfer_logs(
     from_block: int,
     to_block: int,
     pair_address: str,
+    direction: str,
 ) -> List[Dict[str, Any]]:
+
+    if direction == "buy":
+        topics = [
+            TRANSFER_TOPIC,
+            address_to_topic(pair_address),
+        ]
+    elif direction == "sell":
+        topics = [
+            TRANSFER_TOPIC,
+            None,
+            address_to_topic(pair_address),
+        ]
+    else:
+        raise ValueError("direction buy veya sell olmalı.")
 
     params = {
         "fromBlock": int_to_hex(from_block),
         "toBlock": int_to_hex(to_block),
         "address": TOKEN_ADDRESS,
-        "topics": [
-            TRANSFER_TOPIC,
-            address_to_topic(pair_address),
-        ],
+        "topics": topics,
     }
 
     result = rpc_call("eth_getLogs", [params])
@@ -260,7 +259,7 @@ def get_transfer_logs(
     return result
 
 
-def decode_transfer_log(log: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def decode_transfer_log(log: Dict[str, Any], event_type: str) -> Optional[Dict[str, Any]]:
     topics = log.get("topics") or []
 
     if len(topics) < 3:
@@ -273,22 +272,23 @@ def decode_transfer_log(log: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     raw_value = hex_to_int(raw_value_hex)
 
     token_amount = raw_value / (10 ** TOKEN_DECIMALS)
-
     tx_hash = log.get("transactionHash", "")
 
+    wallet = to_addr if event_type == "buy" else from_addr
+
     return {
+        "event_type": event_type,
         "tx_hash": tx_hash,
         "from": from_addr,
         "to": to_addr,
+        "wallet": wallet,
         "token_amount": token_amount,
     }
 
 
 def get_wallet_token_balance(wallet: str) -> Optional[float]:
     selector = "0x70a08231"
-
     wallet_clean = wallet.lower().replace("0x", "").rjust(64, "0")
-
     data = selector + wallet_clean
 
     call_obj = {
@@ -298,14 +298,11 @@ def get_wallet_token_balance(wallet: str) -> Optional[float]:
 
     try:
         result = rpc_call("eth_call", [call_obj, "latest"])
-
         raw = hex_to_int(result)
-
         return raw / (10 ** TOKEN_DECIMALS)
 
     except Exception as e:
         logger.warning("Wallet balance alınamadı: %s", e)
-
         return None
 
 
@@ -330,35 +327,44 @@ def build_message(
     liquidity_usd = (pair.get("liquidity") or {}).get("usd")
     market_cap = pair.get("marketCap")
 
+    event_type = transfer.get("event_type", "")
     tx_hash = transfer.get("tx_hash", "")
-    buyer = transfer.get("to", "")
-
+    wallet = transfer.get("wallet", "")
     token_amount = float(transfer.get("token_amount") or 0)
 
-    usd_value = token_amount * price_usd if price_usd > 0 else 0
-    quote_amount = token_amount * price_native if price_native > 0 else 0
+    usd_value = token_amount * price_usd
+    quote_amount = token_amount * price_native
 
     wallet_value = None
-
     if wallet_balance is not None:
         wallet_value = wallet_balance * price_usd
 
+    is_buy = event_type == "buy"
+
     lines: List[str] = []
 
-    lines.append(f"🟢 {PROJECT_NAME} BUY!")
-    lines.append("")
-    lines.append("✅ New Buy Detected")
-    lines.append("")
-    lines.append(
-        f"💵 Spent: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
-    )
-    lines.append(
-        f"🪙 Got: {fmt_number(token_amount)} {base_symbol}"
-    )
-    lines.append("")
-    lines.append(
-        f"📈 Buy Price: {fmt_money(price_usd)}"
-    )
+    if is_buy:
+        lines.append(f"🟢 {PROJECT_NAME} BUY!")
+        lines.append("")
+        lines.append("✅ New Buy Detected")
+        lines.append("")
+        lines.append(
+            f"💵 Spent: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
+        )
+        lines.append(f"🪙 Got: {fmt_number(token_amount)} {base_symbol}")
+        lines.append("")
+        lines.append(f"📈 Buy Price: {fmt_money(price_usd)}")
+    else:
+        lines.append(f"🔴 {PROJECT_NAME} SELL!")
+        lines.append("")
+        lines.append("⚠️ New Sell Detected")
+        lines.append("")
+        lines.append(f"🪙 Sold: {fmt_number(token_amount)} {base_symbol}")
+        lines.append(
+            f"💰 Received Est.: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
+        )
+        lines.append("")
+        lines.append(f"📉 Sell Price: {fmt_money(price_usd)}")
 
     if wallet_balance is not None:
         lines.append(
@@ -374,7 +380,7 @@ def build_message(
         lines.append(f"🏦 Market Cap: {fmt_money(float(market_cap))}")
 
     lines.append("")
-    lines.append(f"👛 Buyer: {short_wallet(buyer)}")
+    lines.append(f"👛 Wallet: {short_wallet(wallet)}")
     lines.append(f"🔗 TX: https://basescan.org/tx/{tx_hash}")
 
     if chart_url:
@@ -383,15 +389,67 @@ def build_message(
     return "\n".join(lines)
 
 
+def process_logs(
+    logs: List[Dict[str, Any]],
+    event_type: str,
+    pair: Dict[str, Any],
+) -> None:
+
+    for log in logs:
+        transfer = decode_transfer_log(log, event_type)
+
+        if not transfer:
+            continue
+
+        tx_hash = transfer["tx_hash"]
+
+        if not tx_hash:
+            continue
+
+        dedupe_key = f"{event_type}:{tx_hash}"
+
+        if dedupe_key in seen_hashes:
+            continue
+
+        seen_hashes.add(dedupe_key)
+
+        token_amount = float(transfer.get("token_amount") or 0)
+        price_usd = float(pair.get("priceUsd") or 0)
+        usd_value = token_amount * price_usd
+
+        if event_type == "buy" and usd_value < MIN_BUY_ALERT_USD:
+            logger.info("Buy küçük geçti: %s", fmt_money(usd_value))
+            continue
+
+        if event_type == "sell" and usd_value < MIN_SELL_ALERT_USD:
+            logger.info("Sell küçük geçti: %s", fmt_money(usd_value))
+            continue
+
+        wallet = transfer.get("wallet", "")
+        wallet_balance = get_wallet_token_balance(wallet) if wallet else None
+
+        msg = build_message(
+            pair=pair,
+            transfer=transfer,
+            wallet_balance=wallet_balance,
+        )
+
+        if event_type == "buy":
+            send_telegram(msg, CHANNEL_ID)
+            logger.info("BUY alert gönderildi: %s", tx_hash)
+        else:
+            send_telegram(msg, SELL_CHANNEL_ID)
+            logger.info("SELL alert gönderildi: %s", tx_hash)
+
+
 def main() -> None:
     global last_checked_block
     global cached_pair
     global last_price_refresh
 
-    logger.info("IRVUS BUY BOT RPC başladı.")
+    logger.info("IRVUS BUY/SELL BOT RPC başladı.")
 
     pair = get_pair()
-
     pair_address = str(pair.get("pairAddress") or "").lower()
 
     last_price_refresh = time.time()
@@ -399,14 +457,12 @@ def main() -> None:
     logger.info("İzlenen pair: %s", pair_address)
 
     latest_block = get_latest_block()
-
     last_checked_block = max(latest_block - BLOCK_LOOKBACK, 0)
 
     logger.info("Başlangıç block: %s", last_checked_block)
 
     while True:
         try:
-
             latest_block = get_latest_block()
 
             from_block = (last_checked_block or latest_block) + 1
@@ -424,71 +480,32 @@ def main() -> None:
                 continue
 
             pair = refresh_pair(pair_address)
-
             cached_pair = pair
 
-            logs = get_transfer_logs(
+            buy_logs = get_transfer_logs(
                 from_block=from_block,
                 to_block=to_block,
                 pair_address=pair_address,
+                direction="buy",
+            )
+
+            sell_logs = get_transfer_logs(
+                from_block=from_block,
+                to_block=to_block,
+                pair_address=pair_address,
+                direction="sell",
             )
 
             logger.info(
-                "Block kontrol: %s -> %s | bulunan log: %s",
+                "Block kontrol: %s -> %s | buy log: %s | sell log: %s",
                 from_block,
                 to_block,
-                len(logs),
+                len(buy_logs),
+                len(sell_logs),
             )
 
-            for log in logs:
-
-                transfer = decode_transfer_log(log)
-
-                if not transfer:
-                    continue
-
-                tx_hash = transfer["tx_hash"]
-
-                if not tx_hash:
-                    continue
-
-                if tx_hash in seen_hashes:
-                    continue
-
-                seen_hashes.add(tx_hash)
-
-                token_amount = float(transfer.get("token_amount") or 0)
-
-                price_usd = float(pair.get("priceUsd") or 0)
-
-                usd_value = token_amount * price_usd
-
-                if usd_value < MIN_BUY_ALERT_USD:
-                    logger.info(
-                        "Buy küçük geçti: %s",
-                        fmt_money(usd_value),
-                    )
-                    continue
-
-                buyer = transfer.get("to", "")
-
-                wallet_balance = None
-
-                if buyer:
-                    wallet_balance = get_wallet_token_balance(buyer)
-
-                msg = build_message(
-                    pair=pair,
-                    transfer=transfer,
-                    wallet_balance=wallet_balance,
-                )
-
-                send_telegram(msg)
-
-                logger.info(
-                    "BUY alert gönderildi: %s",
-                    tx_hash,
-                )
+            process_logs(buy_logs, "buy", pair)
+            process_logs(sell_logs, "sell", pair)
 
             last_checked_block = to_block
 
@@ -496,7 +513,7 @@ def main() -> None:
                 seen_hashes.clear()
 
         except Exception as e:
-            logger.exception("BUY BOT hata verdi: %s", e)
+            logger.exception("BUY/SELL BOT hata verdi: %s", e)
 
         time.sleep(CHECK_INTERVAL)
 
