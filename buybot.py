@@ -292,23 +292,24 @@ def get_holder_count() -> Optional[int]:
         ]
 
         for pattern in patterns:
-            m = re.search(pattern, html, re.IGNORECASE)
+    m = re.search(pattern, html, re.IGNORECASE)
 
-            if m:
-                raw_holder = (m.group(1) or "").replace(",", "").strip()
+    if not m:
+        continue
 
-if not raw_holder.isdigit():
-    continue
+    raw_holder = (m.group(1) or "").replace(",", "").strip()
 
-holders = int(raw_holder)
+    if not raw_holder.isdigit():
+        continue
 
-                cached_holders = holders
-                last_holder_refresh = now
+    holders = int(raw_holder)
 
-                logger.info("Holders BaseScan scrape ile alındı: %s", holders)
+    cached_holders = holders
+    last_holder_refresh = now
 
-                return holders
+    logger.info("Holders BaseScan scrape ile alındı: %s", holders)
 
+    return holders
         logger.warning("BaseScan holders scrape pattern bulunamadı.")
 
     except Exception as e:
