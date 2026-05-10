@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
-import re
 import time
 import logging
 from typing import Any, Dict, List, Optional, Set
@@ -68,7 +67,7 @@ logging.basicConfig(
 logger = logging.getLogger("irvus-buy-sell-bot")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/5.0"})
+session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/6.0"})
 
 seen_hashes: Set[str] = set()
 cached_pair: Optional[Dict[str, Any]] = None
@@ -470,28 +469,24 @@ def process_transfers(
             event_type = classify_transfer(transfer)
 
             if event_type is None:
+                logger.info(
+                    "TRANSFER DEBUG | tx=%s | from=%s | to=%s | amount=%s",
+                    tx_hash,
+                    transfer.get("from"),
+                    transfer.get("to"),
+                    fmt_number(float(transfer.get("token_amount") or 0)),
+                )
                 continue
 
             classified_items.append((event_type, transfer))
 
-if not classified_items:
-
-    logger.info(
-        "TX sınıflandırılamadı: %s | transfer_count=%s",
-        tx_hash,
-        len(tx_transfers),
-    )
-
-    for t in tx_transfers:
-
-        logger.info(
-            "TRANSFER DEBUG | from=%s | to=%s | amount=%s",
-            t.get("from"),
-            t.get("to"),
-            fmt_number(float(t.get("token_amount") or 0)),
-        )
-
-    continue
+        if not classified_items:
+            logger.info(
+                "TX sınıflandırılamadı: %s | transfer_count=%s",
+                tx_hash,
+                len(tx_transfers),
+            )
+            continue
 
         buy_items = [item for item in classified_items if item[0] == "buy"]
         sell_items = [item for item in classified_items if item[0] == "sell"]
