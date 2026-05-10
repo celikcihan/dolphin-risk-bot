@@ -16,6 +16,7 @@ import requests
 
 DEX_BASE = "https://api.dexscreener.com"
 TG_BASE = "https://api.telegram.org"
+ETHERSCAN_V2_BASE = "https://api.etherscan.io/v2/api"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
@@ -24,21 +25,25 @@ SELL_CHANNEL_ID = os.getenv("SELL_CHANNEL_ID", CHANNEL_ID)
 PROJECT_NAME = os.getenv("PROJECT_NAME", "IRVUS")
 
 CHAIN = os.getenv("CHAIN", "base")
+CHAIN_ID = int(os.getenv("CHAIN_ID", "8453"))
 BASE_RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
 
 TOKEN_ADDRESS = os.getenv("TOKEN_ADDRESS", "").lower()
-
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
-MIN_BUY_ALERT_USD = float(os.getenv("MIN_BUY_ALERT_USD", "1"))
-MIN_SELL_ALERT_USD = float(os.getenv("MIN_SELL_ALERT_USD", "1"))
 TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "18"))
 
-BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "1000"))
-PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "600"))
+ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
+HOLDERS_COUNT = os.getenv("HOLDERS_COUNT", "")
 
-# Base Uniswap v4 PoolManager default. Gerekirse env ile genişleteceğiz.
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "90"))
+MIN_BUY_ALERT_USD = float(os.getenv("MIN_BUY_ALERT_USD", "1"))
+MIN_SELL_ALERT_USD = float(os.getenv("MIN_SELL_ALERT_USD", "1"))
+
+BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "3000"))
+PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "600"))
+HOLDER_REFRESH_SECONDS = int(os.getenv("HOLDER_REFRESH_SECONDS", "1800"))
+
 DEFAULT_DEX_ADDRESSES = [
-    "0x498581ff718922c3f8e6a244956af099b2652b2b",
+    "0x000000000004444c5dc75cb358380d2e3de08a90",
 ]
 
 DEX_ADDRESSES_ENV = os.getenv("DEX_ADDRESSES", "")
@@ -64,15 +69,18 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-logger = logging.getLogger("irvus-transfer-buy-sell-bot")
+logger = logging.getLogger("irvus-buy-sell-bot")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "IRVUS-TRANSFER-BUY-SELL-BOT/1.0"})
+session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/2.0"})
 
 seen_hashes: Set[str] = set()
 cached_pair: Optional[Dict[str, Any]] = None
 last_checked_block: Optional[int] = None
 last_price_refresh = 0.0
+
+cached_holders: Optional[int] = None
+last_holder_refresh = 0.0
 
 
 def rpc_call(method: str, params: list[Any]) -> Any:
@@ -245,6 +253,51 @@ def refresh_pair() -> Dict[str, Any]:
     return cached_pair or get_pair()
 
 
+def get_holder_count() -> Optional[int]:
+    global cached_holders
+    global last_holder_refresh
+
+    now = time.time()
+
+    if cached_holders is not None and (now - last_holder_refresh < HOLDER_REFRESH_SECONDS):
+        return cached_holders
+
+    if ETHERSCAN_API_KEY:
+        try:
+            params = {
+                "chainid": CHAIN_ID,
+                "module": "token",
+                "action": "tokenholdercount",
+                "contractaddress": TOKEN_ADDRESS,
+                "apikey": ETHERSCAN_API_KEY,
+            }
+
+            r = session.get(ETHERSCAN_V2_BASE, params=params, timeout=20)
+            r.raise_for_status()
+
+            data = r.json()
+
+            if str(data.get("status")) == "1":
+                cached_holders = int(data.get("result"))
+                last_holder_refresh = now
+                return cached_holders
+
+            logger.warning("Holder API döndü ama başarılı değil: %s", data)
+
+        except Exception as e:
+            logger.warning("Holder count API alınamadı: %s", e)
+
+    if HOLDERS_COUNT.strip():
+        try:
+            cached_holders = int(float(HOLDERS_COUNT.strip()))
+            last_holder_refresh = now
+            return cached_holders
+        except Exception:
+            pass
+
+    return cached_holders
+
+
 def get_all_transfer_logs(from_block: int, to_block: int) -> List[Dict[str, Any]]:
     params = {
         "fromBlock": int_to_hex(from_block),
@@ -295,11 +348,9 @@ def classify_transfer(transfer: Dict[str, Any]) -> Optional[str]:
     if from_addr in IGNORE_ADDRESSES or to_addr in IGNORE_ADDRESSES:
         return None
 
-    # BUY: DEX/PoolManager -> wallet
     if from_addr in DEX_ADDRESSES and to_addr not in DEX_ADDRESSES:
         return "buy"
 
-    # SELL: wallet -> DEX/PoolManager
     if to_addr in DEX_ADDRESSES and from_addr not in DEX_ADDRESSES:
         return "sell"
 
@@ -331,6 +382,7 @@ def build_message(
     transfer: Dict[str, Any],
     event_type: str,
     wallet_balance: Optional[float],
+    holders: Optional[int],
 ) -> str:
     base = pair.get("baseToken") or {}
     quote = pair.get("quoteToken") or {}
@@ -391,6 +443,11 @@ def build_message(
 
     lines.append(f"🏪 DEX: {dex_id}")
 
+    if holders is not None:
+        lines.append(f"👥 Holders: {holders:,}")
+    else:
+        lines.append("👥 Holders: n/a")
+
     if liquidity_usd is not None:
         lines.append(f"💧 Liquidity: {fmt_money(float(liquidity_usd))}")
 
@@ -410,59 +467,85 @@ def build_message(
 def process_transfers(
     transfers: List[Dict[str, Any]],
     pair: Dict[str, Any],
+    holders: Optional[int],
 ) -> None:
     unknown_count = 0
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
 
     for transfer in transfers:
         tx_hash = transfer.get("tx_hash")
-
         if not tx_hash:
             continue
 
-        event_type = classify_transfer(transfer)
+        grouped.setdefault(tx_hash, []).append(transfer)
 
-        if event_type is None:
-            unknown_count += 1
-
-            # Debug için ilk birkaç bilinmeyeni logla
-            if unknown_count <= 5:
-                logger.info(
-                    "UNKNOWN transfer | from=%s | to=%s | amount=%s | tx=%s",
-                    transfer.get("from"),
-                    transfer.get("to"),
-                    fmt_number(float(transfer.get("token_amount") or 0)),
-                    tx_hash,
-                )
-
+    for tx_hash, tx_transfers in grouped.items():
+        if tx_hash in seen_hashes:
             continue
 
-        dedupe_key = f"{event_type}:{tx_hash}"
+        classified_items = []
 
-        if dedupe_key in seen_hashes:
+        for transfer in tx_transfers:
+            event_type = classify_transfer(transfer)
+
+            if event_type is None:
+                unknown_count += 1
+
+                if unknown_count <= 5:
+                    logger.info(
+                        "UNKNOWN transfer | from=%s | to=%s | amount=%s | tx=%s",
+                        transfer.get("from"),
+                        transfer.get("to"),
+                        fmt_number(float(transfer.get("token_amount") or 0)),
+                        tx_hash,
+                    )
+
+                continue
+
+            classified_items.append((event_type, transfer))
+
+        if not classified_items:
             continue
 
-        seen_hashes.add(dedupe_key)
+        buy_items = [item for item in classified_items if item[0] == "buy"]
+        sell_items = [item for item in classified_items if item[0] == "sell"]
 
-        token_amount = float(transfer.get("token_amount") or 0)
+        if buy_items:
+            event_type, selected_transfer = max(
+                buy_items,
+                key=lambda x: float(x[1].get("token_amount") or 0),
+            )
+        elif sell_items:
+            event_type, selected_transfer = max(
+                sell_items,
+                key=lambda x: float(x[1].get("token_amount") or 0),
+            )
+        else:
+            continue
+
+        token_amount = float(selected_transfer.get("token_amount") or 0)
         price_usd = float(pair.get("priceUsd") or 0)
         usd_value = token_amount * price_usd
 
         if event_type == "buy" and usd_value < MIN_BUY_ALERT_USD:
             logger.info("Buy küçük geçti: %s", fmt_money(usd_value))
+            seen_hashes.add(tx_hash)
             continue
 
         if event_type == "sell" and usd_value < MIN_SELL_ALERT_USD:
             logger.info("Sell küçük geçti: %s", fmt_money(usd_value))
+            seen_hashes.add(tx_hash)
             continue
 
-        wallet = transfer["to"] if event_type == "buy" else transfer["from"]
+        wallet = selected_transfer["to"] if event_type == "buy" else selected_transfer["from"]
         wallet_balance = get_wallet_token_balance(wallet)
 
         msg = build_message(
             pair=pair,
-            transfer=transfer,
+            transfer=selected_transfer,
             event_type=event_type,
             wallet_balance=wallet_balance,
+            holders=holders,
         )
 
         if event_type == "buy":
@@ -471,6 +554,8 @@ def process_transfers(
         else:
             send_telegram(msg, SELL_CHANNEL_ID)
             logger.info("SELL alert gönderildi: %s", tx_hash)
+
+        seen_hashes.add(tx_hash)
 
     if unknown_count:
         logger.info("UNKNOWN transfer sayısı: %s", unknown_count)
@@ -516,6 +601,8 @@ def main() -> None:
             pair = refresh_pair()
             cached_pair = pair
 
+            holders = get_holder_count()
+
             logs = get_all_transfer_logs(
                 from_block=from_block,
                 to_block=to_block,
@@ -535,7 +622,7 @@ def main() -> None:
                 len(transfers),
             )
 
-            process_transfers(transfers, pair)
+            process_transfers(transfers, pair, holders)
 
             last_checked_block = to_block
 
