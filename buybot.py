@@ -67,7 +67,7 @@ logging.basicConfig(
 logger = logging.getLogger("irvus-buy-sell-bot")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/6.0"})
+session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/7.0"})
 
 seen_hashes: Set[str] = set()
 cached_pair: Optional[Dict[str, Any]] = None
@@ -109,6 +109,10 @@ def normalize_topic_address(topic: str) -> str:
     return "0x" + topic[-40:].lower()
 
 
+def escape_md(text: str) -> str:
+    return str(text).replace("_", "\\_")
+
+
 def fmt_money(v: Optional[float]) -> str:
     if v is None:
         return "n/a"
@@ -145,6 +149,7 @@ def send_telegram(text: str, chat_id: str) -> None:
         "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": True,
+        "parse_mode": "Markdown",
     }
 
     r = session.post(url, json=payload, timeout=20)
@@ -355,6 +360,87 @@ def classify_transfer(transfer: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def find_real_wallet(
+    tx_transfers: List[Dict[str, Any]],
+    event_type: str,
+    selected_transfer: Dict[str, Any],
+) -> str:
+    """
+    BUY işleminde ara route contract'ı yerine final alıcıyı seçer.
+    SELL işleminde DEX tarafına token gönderen kullanıcıyı seçer.
+    """
+    if event_type == "buy":
+        candidates = []
+
+        for t in tx_transfers:
+            to_addr = str(t.get("to", "")).lower()
+            from_addr = str(t.get("from", "")).lower()
+            amount = float(t.get("token_amount") or 0)
+
+            if to_addr in IGNORE_ADDRESSES:
+                continue
+
+            if to_addr in DEX_ADDRESSES:
+                continue
+
+            candidates.append(
+                {
+                    "address": to_addr,
+                    "amount": amount,
+                    "from_is_dex": from_addr in DEX_ADDRESSES,
+                }
+            )
+
+        # Ara route kontratından sonra giden final alıcıyı tercih et
+        final_candidates = [
+            c for c in candidates
+            if not c["from_is_dex"]
+        ]
+
+        if final_candidates:
+            return max(final_candidates, key=lambda c: c["amount"])["address"]
+
+        if candidates:
+            return max(candidates, key=lambda c: c["amount"])["address"]
+
+        return str(selected_transfer.get("to", "")).lower()
+
+    # SELL
+    candidates = []
+
+    for t in tx_transfers:
+        from_addr = str(t.get("from", "")).lower()
+        to_addr = str(t.get("to", "")).lower()
+        amount = float(t.get("token_amount") or 0)
+
+        if from_addr in IGNORE_ADDRESSES:
+            continue
+
+        if from_addr in DEX_ADDRESSES:
+            continue
+
+        candidates.append(
+            {
+                "address": from_addr,
+                "amount": amount,
+                "to_is_dex": to_addr in DEX_ADDRESSES,
+            }
+        )
+
+    to_dex_candidates = [
+        c for c in candidates
+        if c["to_is_dex"]
+    ]
+
+    if to_dex_candidates:
+        return max(to_dex_candidates, key=lambda c: c["amount"])["address"]
+
+    if candidates:
+        return max(candidates, key=lambda c: c["amount"])["address"]
+
+    return str(selected_transfer.get("from", "")).lower()
+
+
 def get_wallet_token_balance(wallet: str) -> Optional[float]:
     selector = "0x70a08231"
     wallet_clean = wallet.lower().replace("0x", "").rjust(64, "0")
@@ -378,16 +464,17 @@ def build_message(
     pair: Dict[str, Any],
     transfer: Dict[str, Any],
     event_type: str,
+    wallet: str,
     wallet_balance: Optional[float],
     holders: Optional[int],
 ) -> str:
     base = pair.get("baseToken") or {}
     quote = pair.get("quoteToken") or {}
 
-    base_symbol = base.get("symbol", PROJECT_NAME)
-    quote_symbol = quote.get("symbol", "ETH")
+    base_symbol = escape_md(base.get("symbol", PROJECT_NAME))
+    quote_symbol = escape_md(quote.get("symbol", "ETH"))
 
-    dex_id = pair.get("dexId", "DEX")
+    dex_id = escape_md(pair.get("dexId", "DEX"))
     chart_url = pair.get("url", "")
 
     price_usd = float(pair.get("priceUsd") or 0)
@@ -399,21 +486,19 @@ def build_message(
     tx_hash = transfer.get("tx_hash", "")
     token_amount = float(transfer.get("token_amount") or 0)
 
-    wallet = transfer["to"] if event_type == "buy" else transfer["from"]
-
     usd_value = token_amount * price_usd
     quote_amount = token_amount * price_native
 
     lines: List[str] = []
 
     if event_type == "buy":
-        lines.append(f"🟢 {PROJECT_NAME} BUY!")
+        lines.append(f"🟢 {escape_md(PROJECT_NAME)} BUY!")
         lines.append("")
         lines.append(f"💵 Spent: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})")
         lines.append(f"🪙 Got: {fmt_number(token_amount)} {base_symbol}")
         lines.append(f"📈 Price: {fmt_money(price_usd)}")
     else:
-        lines.append(f"🔴 {PROJECT_NAME} SELL!")
+        lines.append(f"🔴 {escape_md(PROJECT_NAME)} SELL!")
         lines.append("")
         lines.append(f"🪙 Sold: {fmt_number(token_amount)} {base_symbol}")
         lines.append(f"💰 Value: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})")
@@ -435,11 +520,11 @@ def build_message(
         lines.append(f"🏦 Market Cap: {fmt_money(float(market_cap))}")
 
     lines.append("")
-    lines.append(f"👛 Wallet: {short_wallet(wallet)}")
-    lines.append(f"🔗 TX: https://basescan.org/tx/{tx_hash}")
+    lines.append(f"👛 Wallet: `{wallet}`")
+    lines.append(f"🔗 [TX](https://basescan.org/tx/{tx_hash})")
 
     if chart_url:
-        lines.append(f"📊 Chart: {chart_url}")
+        lines.append(f"📊 [Chart]({chart_url})")
 
     return "\n".join(lines)
 
@@ -518,13 +603,19 @@ def process_transfers(
             seen_hashes.add(tx_hash)
             continue
 
-        wallet = selected_transfer["to"] if event_type == "buy" else selected_transfer["from"]
+        wallet = find_real_wallet(
+            tx_transfers=tx_transfers,
+            event_type=event_type,
+            selected_transfer=selected_transfer,
+        )
+
         wallet_balance = get_wallet_token_balance(wallet)
 
         msg = build_message(
             pair=pair,
             transfer=selected_transfer,
             event_type=event_type,
+            wallet=wallet,
             wallet_balance=wallet_balance,
             holders=holders,
         )
@@ -545,6 +636,7 @@ def main() -> None:
     global last_price_refresh
 
     logger.info("IRVUS BUY/SELL BOT RPC başladı.")
+    logger.info("Bot version: IRVUS-BUY-SELL-BOT/7.0")
     logger.info("DEX adresleri: %s", ",".join(sorted(DEX_ADDRESSES)))
 
     pair = get_pair()
