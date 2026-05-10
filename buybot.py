@@ -28,13 +28,33 @@ BASE_RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
 
 TOKEN_ADDRESS = os.getenv("TOKEN_ADDRESS", "").lower()
 
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "30"))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
 MIN_BUY_ALERT_USD = float(os.getenv("MIN_BUY_ALERT_USD", "1"))
 MIN_SELL_ALERT_USD = float(os.getenv("MIN_SELL_ALERT_USD", "1"))
 TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "18"))
 
-BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "30"))
-PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "300"))
+BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "1000"))
+PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "600"))
+
+# Base Uniswap v4 PoolManager default. Gerekirse env ile genişleteceğiz.
+DEFAULT_DEX_ADDRESSES = [
+    "0x498581ff718922c3f8e6a244956af099b2652b2b",
+]
+
+DEX_ADDRESSES_ENV = os.getenv("DEX_ADDRESSES", "")
+if DEX_ADDRESSES_ENV.strip():
+    DEX_ADDRESSES = {
+        x.strip().lower()
+        for x in DEX_ADDRESSES_ENV.split(",")
+        if x.strip()
+    }
+else:
+    DEX_ADDRESSES = {x.lower() for x in DEFAULT_DEX_ADDRESSES}
+
+IGNORE_ADDRESSES = {
+    "0x0000000000000000000000000000000000000000",
+    "0x000000000000000000000000000000000000dead",
+}
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
@@ -44,10 +64,10 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-logger = logging.getLogger("irvus-buy-sell-bot")
+logger = logging.getLogger("irvus-transfer-buy-sell-bot")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/1.0"})
+session.headers.update({"User-Agent": "IRVUS-TRANSFER-BUY-SELL-BOT/1.0"})
 
 seen_hashes: Set[str] = set()
 cached_pair: Optional[Dict[str, Any]] = None
@@ -86,11 +106,6 @@ def normalize_topic_address(topic: str) -> str:
     return "0x" + topic[-40:].lower()
 
 
-def address_to_topic(address: str) -> str:
-    clean = address.lower().replace("0x", "")
-    return "0x" + clean.rjust(64, "0")
-
-
 def fmt_money(v: Optional[float]) -> str:
     if v is None:
         return "n/a"
@@ -116,6 +131,11 @@ def short_wallet(addr: str) -> str:
 
 
 def send_telegram(text: str, chat_id: str) -> None:
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN boş.")
+    if not chat_id:
+        raise ValueError("CHANNEL_ID boş.")
+
     url = f"{TG_BASE}/bot{BOT_TOKEN}/sendMessage"
 
     payload = {
@@ -164,7 +184,7 @@ def get_pair_by_address(pair_address: str) -> Optional[Dict[str, Any]]:
 
 def choose_best_pair(pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not pairs:
-        raise ValueError("Pair bulunamadı.")
+        raise ValueError("DexScreener pair bulunamadı.")
 
     def score(p: Dict[str, Any]) -> float:
         liq = float((p.get("liquidity") or {}).get("usd") or 0)
@@ -194,7 +214,7 @@ def get_pair() -> Dict[str, Any]:
     return pair
 
 
-def refresh_pair(pair_address: str) -> Dict[str, Any]:
+def refresh_pair() -> Dict[str, Any]:
     global cached_pair
     global last_price_refresh
 
@@ -204,7 +224,10 @@ def refresh_pair(pair_address: str) -> Dict[str, Any]:
         return cached_pair
 
     try:
-        pair = get_pair_by_address(pair_address)
+        if cached_pair and cached_pair.get("pairAddress"):
+            pair = get_pair_by_address(str(cached_pair["pairAddress"]).lower())
+        else:
+            pair = get_pair()
 
         if pair:
             cached_pair = pair
@@ -214,41 +237,22 @@ def refresh_pair(pair_address: str) -> Dict[str, Any]:
 
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 429:
-            logger.warning("DexScreener rate limit yedi. Cached pair kullanılacak.")
+            logger.warning("DexScreener rate limit. Cached pair kullanılacak.")
             if cached_pair:
                 return cached_pair
         raise
 
-    logger.warning("Pair refresh edilemedi. Cached pair kullanılacak.")
     return cached_pair or get_pair()
 
 
-def get_transfer_logs(
-    from_block: int,
-    to_block: int,
-    pair_address: str,
-    direction: str,
-) -> List[Dict[str, Any]]:
-
-    if direction == "buy":
-        topics = [
-            TRANSFER_TOPIC,
-            address_to_topic(pair_address),
-        ]
-    elif direction == "sell":
-        topics = [
-            TRANSFER_TOPIC,
-            None,
-            address_to_topic(pair_address),
-        ]
-    else:
-        raise ValueError("direction buy veya sell olmalı.")
-
+def get_all_transfer_logs(from_block: int, to_block: int) -> List[Dict[str, Any]]:
     params = {
         "fromBlock": int_to_hex(from_block),
         "toBlock": int_to_hex(to_block),
         "address": TOKEN_ADDRESS,
-        "topics": topics,
+        "topics": [
+            TRANSFER_TOPIC,
+        ],
     }
 
     result = rpc_call("eth_getLogs", [params])
@@ -259,7 +263,7 @@ def get_transfer_logs(
     return result
 
 
-def decode_transfer_log(log: Dict[str, Any], event_type: str) -> Optional[Dict[str, Any]]:
+def decode_transfer_log(log: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     topics = log.get("topics") or []
 
     if len(topics) < 3:
@@ -272,18 +276,34 @@ def decode_transfer_log(log: Dict[str, Any], event_type: str) -> Optional[Dict[s
     raw_value = hex_to_int(raw_value_hex)
 
     token_amount = raw_value / (10 ** TOKEN_DECIMALS)
+
     tx_hash = log.get("transactionHash", "")
 
-    wallet = to_addr if event_type == "buy" else from_addr
-
     return {
-        "event_type": event_type,
         "tx_hash": tx_hash,
         "from": from_addr,
         "to": to_addr,
-        "wallet": wallet,
         "token_amount": token_amount,
+        "block_number": hex_to_int(log.get("blockNumber", "0x0")),
     }
+
+
+def classify_transfer(transfer: Dict[str, Any]) -> Optional[str]:
+    from_addr = str(transfer.get("from", "")).lower()
+    to_addr = str(transfer.get("to", "")).lower()
+
+    if from_addr in IGNORE_ADDRESSES or to_addr in IGNORE_ADDRESSES:
+        return None
+
+    # BUY: DEX/PoolManager -> wallet
+    if from_addr in DEX_ADDRESSES and to_addr not in DEX_ADDRESSES:
+        return "buy"
+
+    # SELL: wallet -> DEX/PoolManager
+    if to_addr in DEX_ADDRESSES and from_addr not in DEX_ADDRESSES:
+        return "sell"
+
+    return None
 
 
 def get_wallet_token_balance(wallet: str) -> Optional[float]:
@@ -309,9 +329,9 @@ def get_wallet_token_balance(wallet: str) -> Optional[float]:
 def build_message(
     pair: Dict[str, Any],
     transfer: Dict[str, Any],
+    event_type: str,
     wallet_balance: Optional[float],
 ) -> str:
-
     base = pair.get("baseToken") or {}
     quote = pair.get("quoteToken") or {}
 
@@ -327,10 +347,10 @@ def build_message(
     liquidity_usd = (pair.get("liquidity") or {}).get("usd")
     market_cap = pair.get("marketCap")
 
-    event_type = transfer.get("event_type", "")
     tx_hash = transfer.get("tx_hash", "")
-    wallet = transfer.get("wallet", "")
     token_amount = float(transfer.get("token_amount") or 0)
+
+    wallet = transfer["to"] if event_type == "buy" else transfer["from"]
 
     usd_value = token_amount * price_usd
     quote_amount = token_amount * price_native
@@ -339,17 +359,15 @@ def build_message(
     if wallet_balance is not None:
         wallet_value = wallet_balance * price_usd
 
-    is_buy = event_type == "buy"
-
     lines: List[str] = []
 
-    if is_buy:
+    if event_type == "buy":
         lines.append(f"🟢 {PROJECT_NAME} BUY!")
         lines.append("")
         lines.append("✅ New Buy Detected")
         lines.append("")
         lines.append(
-            f"💵 Spent: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
+            f"💵 Spent Est.: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
         )
         lines.append(f"🪙 Got: {fmt_number(token_amount)} {base_symbol}")
         lines.append("")
@@ -389,21 +407,33 @@ def build_message(
     return "\n".join(lines)
 
 
-def process_logs(
-    logs: List[Dict[str, Any]],
-    event_type: str,
+def process_transfers(
+    transfers: List[Dict[str, Any]],
     pair: Dict[str, Any],
 ) -> None:
+    unknown_count = 0
 
-    for log in logs:
-        transfer = decode_transfer_log(log, event_type)
-
-        if not transfer:
-            continue
-
-        tx_hash = transfer["tx_hash"]
+    for transfer in transfers:
+        tx_hash = transfer.get("tx_hash")
 
         if not tx_hash:
+            continue
+
+        event_type = classify_transfer(transfer)
+
+        if event_type is None:
+            unknown_count += 1
+
+            # Debug için ilk birkaç bilinmeyeni logla
+            if unknown_count <= 5:
+                logger.info(
+                    "UNKNOWN transfer | from=%s | to=%s | amount=%s | tx=%s",
+                    transfer.get("from"),
+                    transfer.get("to"),
+                    fmt_number(float(transfer.get("token_amount") or 0)),
+                    tx_hash,
+                )
+
             continue
 
         dedupe_key = f"{event_type}:{tx_hash}"
@@ -425,12 +455,13 @@ def process_logs(
             logger.info("Sell küçük geçti: %s", fmt_money(usd_value))
             continue
 
-        wallet = transfer.get("wallet", "")
-        wallet_balance = get_wallet_token_balance(wallet) if wallet else None
+        wallet = transfer["to"] if event_type == "buy" else transfer["from"]
+        wallet_balance = get_wallet_token_balance(wallet)
 
         msg = build_message(
             pair=pair,
             transfer=transfer,
+            event_type=event_type,
             wallet_balance=wallet_balance,
         )
 
@@ -441,6 +472,9 @@ def process_logs(
             send_telegram(msg, SELL_CHANNEL_ID)
             logger.info("SELL alert gönderildi: %s", tx_hash)
 
+    if unknown_count:
+        logger.info("UNKNOWN transfer sayısı: %s", unknown_count)
+
 
 def main() -> None:
     global last_checked_block
@@ -448,13 +482,13 @@ def main() -> None:
     global last_price_refresh
 
     logger.info("IRVUS BUY/SELL BOT RPC başladı.")
+    logger.info("DEX adresleri: %s", ",".join(sorted(DEX_ADDRESSES)))
 
     pair = get_pair()
-    pair_address = str(pair.get("pairAddress") or "").lower()
-
+    cached_pair = pair
     last_price_refresh = time.time()
 
-    logger.info("İzlenen pair: %s", pair_address)
+    logger.info("DexScreener pair id: %s", pair.get("pairAddress"))
 
     latest_block = get_latest_block()
     last_checked_block = max(latest_block - BLOCK_LOOKBACK, 0)
@@ -469,7 +503,7 @@ def main() -> None:
             to_block = latest_block
 
             logger.info(
-                "Loop çalışıyor | latest_block=%s | from_block=%s | to_block=%s",
+                "Loop | latest_block=%s | from=%s | to=%s",
                 latest_block,
                 from_block,
                 to_block,
@@ -479,33 +513,29 @@ def main() -> None:
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            pair = refresh_pair(pair_address)
+            pair = refresh_pair()
             cached_pair = pair
 
-            buy_logs = get_transfer_logs(
+            logs = get_all_transfer_logs(
                 from_block=from_block,
                 to_block=to_block,
-                pair_address=pair_address,
-                direction="buy",
             )
 
-            sell_logs = get_transfer_logs(
-                from_block=from_block,
-                to_block=to_block,
-                pair_address=pair_address,
-                direction="sell",
-            )
+            transfers: List[Dict[str, Any]] = []
+
+            for log in logs:
+                decoded = decode_transfer_log(log)
+                if decoded:
+                    transfers.append(decoded)
 
             logger.info(
-                "Block kontrol: %s -> %s | buy log: %s | sell log: %s",
+                "Block kontrol: %s -> %s | toplam IRVUS transfer log: %s",
                 from_block,
                 to_block,
-                len(buy_logs),
-                len(sell_logs),
+                len(transfers),
             )
 
-            process_logs(buy_logs, "buy", pair)
-            process_logs(sell_logs, "sell", pair)
+            process_transfers(transfers, pair)
 
             last_checked_block = to_block
 
