@@ -474,13 +474,24 @@ def process_transfers(
 
             classified_items.append((event_type, transfer))
 
-        if not classified_items:
-            logger.info(
-                "TX sınıflandırılamadı: %s | transfer_count=%s",
-                tx_hash,
-                len(tx_transfers),
-            )
-            continue
+if not classified_items:
+
+    logger.info(
+        "TX sınıflandırılamadı: %s | transfer_count=%s",
+        tx_hash,
+        len(tx_transfers),
+    )
+
+    for t in tx_transfers:
+
+        logger.info(
+            "TRANSFER DEBUG | from=%s | to=%s | amount=%s",
+            t.get("from"),
+            t.get("to"),
+            fmt_number(float(t.get("token_amount") or 0)),
+        )
+
+    continue
 
         buy_items = [item for item in classified_items if item[0] == "buy"]
         sell_items = [item for item in classified_items if item[0] == "sell"]
