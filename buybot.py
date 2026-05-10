@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -7,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import re
 import time
 import logging
 from typing import Any, Dict, List, Optional, Set
@@ -72,7 +74,7 @@ logging.basicConfig(
 logger = logging.getLogger("irvus-buy-sell-bot")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/2.0"})
+session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/3.0"})
 
 seen_hashes: Set[str] = set()
 cached_pair: Optional[Dict[str, Any]] = None
@@ -117,33 +119,34 @@ def normalize_topic_address(topic: str) -> str:
 def fmt_money(v: Optional[float]) -> str:
     if v is None:
         return "n/a"
+
     if abs(v) >= 1:
         return f"${v:,.2f}"
+
     return f"${v:.10f}"
 
 
 def fmt_number(v: Optional[float]) -> str:
     if v is None:
         return "n/a"
+
     if abs(v) >= 1_000_000:
         return f"{v:,.0f}"
+
     if abs(v) >= 1_000:
         return f"{v:,.2f}"
+
     return f"{v:,.6f}"
 
 
 def short_wallet(addr: str) -> str:
     if not addr:
         return "n/a"
+
     return f"{addr[:6]}...{addr[-4:]}"
 
 
 def send_telegram(text: str, chat_id: str) -> None:
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN boş.")
-    if not chat_id:
-        raise ValueError("CHANNEL_ID boş.")
-
     url = f"{TG_BASE}/bot{BOT_TOKEN}/sendMessage"
 
     payload = {
@@ -209,7 +212,9 @@ def get_pair() -> Dict[str, Any]:
         return cached_pair
 
     pairs = get_token_pairs()
+
     pair = choose_best_pair(pairs)
+
     cached_pair = pair
 
     logger.info(
@@ -240,14 +245,18 @@ def refresh_pair() -> Dict[str, Any]:
         if pair:
             cached_pair = pair
             last_price_refresh = now
+
             logger.info("Pair price yenilendi.")
+
             return pair
 
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 429:
             logger.warning("DexScreener rate limit. Cached pair kullanılacak.")
+
             if cached_pair:
                 return cached_pair
+
         raise
 
     return cached_pair or get_pair()
@@ -262,6 +271,46 @@ def get_holder_count() -> Optional[int]:
     if cached_holders is not None and (now - last_holder_refresh < HOLDER_REFRESH_SECONDS):
         return cached_holders
 
+    # BaseScan scrape
+    try:
+        url = f"https://basescan.org/token/{TOKEN_ADDRESS}"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        r = session.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
+
+        html = r.text
+
+        patterns = [
+            r'([\d,]+)\s+holders',
+            r'([\d,]+)\s+Holders',
+            r'Holder[s]?</div>\s*<div[^>]*>\s*([\d,]+)',
+            r'([\d,]+)</div>\s*<div[^>]*>\s*holders',
+        ]
+
+        for pattern in patterns:
+            m = re.search(pattern, html, re.IGNORECASE)
+
+            if m:
+                holders = int(m.group(1).replace(",", ""))
+
+                cached_holders = holders
+                last_holder_refresh = now
+
+                logger.info("Holders BaseScan scrape ile alındı: %s", holders)
+
+                return holders
+
+        logger.warning("BaseScan holders scrape pattern bulunamadı.")
+
+    except Exception as e:
+        logger.warning("BaseScan holders scrape hata: %s", e)
+
+    # API fallback
     if ETHERSCAN_API_KEY:
         try:
             params = {
@@ -280,18 +329,20 @@ def get_holder_count() -> Optional[int]:
             if str(data.get("status")) == "1":
                 cached_holders = int(data.get("result"))
                 last_holder_refresh = now
+
                 return cached_holders
 
-            logger.warning("Holder API döndü ama başarılı değil: %s", data)
-
         except Exception as e:
-            logger.warning("Holder count API alınamadı: %s", e)
+            logger.warning("Holder API hata: %s", e)
 
+    # Manual fallback
     if HOLDERS_COUNT.strip():
         try:
             cached_holders = int(float(HOLDERS_COUNT.strip()))
             last_holder_refresh = now
+
             return cached_holders
+
         except Exception:
             pass
 
@@ -359,7 +410,9 @@ def classify_transfer(transfer: Dict[str, Any]) -> Optional[str]:
 
 def get_wallet_token_balance(wallet: str) -> Optional[float]:
     selector = "0x70a08231"
+
     wallet_clean = wallet.lower().replace("0x", "").rjust(64, "0")
+
     data = selector + wallet_clean
 
     call_obj = {
@@ -369,11 +422,14 @@ def get_wallet_token_balance(wallet: str) -> Optional[float]:
 
     try:
         result = rpc_call("eth_call", [call_obj, "latest"])
+
         raw = hex_to_int(result)
+
         return raw / (10 ** TOKEN_DECIMALS)
 
     except Exception as e:
         logger.warning("Wallet balance alınamadı: %s", e)
+
         return None
 
 
@@ -384,6 +440,7 @@ def build_message(
     wallet_balance: Optional[float],
     holders: Optional[int],
 ) -> str:
+
     base = pair.get("baseToken") or {}
     quote = pair.get("quoteToken") or {}
 
@@ -408,6 +465,7 @@ def build_message(
     quote_amount = token_amount * price_native
 
     wallet_value = None
+
     if wallet_balance is not None:
         wallet_value = wallet_balance * price_usd
 
@@ -424,6 +482,7 @@ def build_message(
         lines.append(f"🪙 Got: {fmt_number(token_amount)} {base_symbol}")
         lines.append("")
         lines.append(f"📈 Buy Price: {fmt_money(price_usd)}")
+
     else:
         lines.append(f"🔴 {PROJECT_NAME} SELL!")
         lines.append("")
@@ -445,8 +504,6 @@ def build_message(
 
     if holders is not None:
         lines.append(f"👥 Holders: {holders:,}")
-    else:
-        lines.append("👥 Holders: n/a")
 
     if liquidity_usd is not None:
         lines.append(f"💧 Liquidity: {fmt_money(float(liquidity_usd))}")
@@ -469,23 +526,28 @@ def process_transfers(
     pair: Dict[str, Any],
     holders: Optional[int],
 ) -> None:
+
     unknown_count = 0
+
     grouped: Dict[str, List[Dict[str, Any]]] = {}
 
     for transfer in transfers:
         tx_hash = transfer.get("tx_hash")
+
         if not tx_hash:
             continue
 
         grouped.setdefault(tx_hash, []).append(transfer)
 
     for tx_hash, tx_transfers in grouped.items():
+
         if tx_hash in seen_hashes:
             continue
 
         classified_items = []
 
         for transfer in tx_transfers:
+
             event_type = classify_transfer(transfer)
 
             if event_type is None:
@@ -515,16 +577,20 @@ def process_transfers(
                 buy_items,
                 key=lambda x: float(x[1].get("token_amount") or 0),
             )
+
         elif sell_items:
             event_type, selected_transfer = max(
                 sell_items,
                 key=lambda x: float(x[1].get("token_amount") or 0),
             )
+
         else:
             continue
 
         token_amount = float(selected_transfer.get("token_amount") or 0)
+
         price_usd = float(pair.get("priceUsd") or 0)
+
         usd_value = token_amount * price_usd
 
         if event_type == "buy" and usd_value < MIN_BUY_ALERT_USD:
@@ -538,6 +604,7 @@ def process_transfers(
             continue
 
         wallet = selected_transfer["to"] if event_type == "buy" else selected_transfer["from"]
+
         wallet_balance = get_wallet_token_balance(wallet)
 
         msg = build_message(
@@ -551,6 +618,7 @@ def process_transfers(
         if event_type == "buy":
             send_telegram(msg, CHANNEL_ID)
             logger.info("BUY alert gönderildi: %s", tx_hash)
+
         else:
             send_telegram(msg, SELL_CHANNEL_ID)
             logger.info("SELL alert gönderildi: %s", tx_hash)
@@ -570,18 +638,22 @@ def main() -> None:
     logger.info("DEX adresleri: %s", ",".join(sorted(DEX_ADDRESSES)))
 
     pair = get_pair()
+
     cached_pair = pair
+
     last_price_refresh = time.time()
 
     logger.info("DexScreener pair id: %s", pair.get("pairAddress"))
 
     latest_block = get_latest_block()
+
     last_checked_block = max(latest_block - BLOCK_LOOKBACK, 0)
 
     logger.info("Başlangıç block: %s", last_checked_block)
 
     while True:
         try:
+
             latest_block = get_latest_block()
 
             from_block = (last_checked_block or latest_block) + 1
@@ -599,6 +671,7 @@ def main() -> None:
                 continue
 
             pair = refresh_pair()
+
             cached_pair = pair
 
             holders = get_holder_count()
@@ -612,6 +685,7 @@ def main() -> None:
 
             for log in logs:
                 decoded = decode_transfer_log(log)
+
                 if decoded:
                     transfers.append(decoded)
 
@@ -622,7 +696,11 @@ def main() -> None:
                 len(transfers),
             )
 
-            process_transfers(transfers, pair, holders)
+            process_transfers(
+                transfers=transfers,
+                pair=pair,
+                holders=holders,
+            )
 
             last_checked_block = to_block
 
@@ -637,3 +715,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+```
