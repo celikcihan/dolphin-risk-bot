@@ -295,7 +295,12 @@ def get_holder_count() -> Optional[int]:
             m = re.search(pattern, html, re.IGNORECASE)
 
             if m:
-                holders = int(m.group(1).replace(",", ""))
+                raw_holder = (m.group(1) or "").replace(",", "").strip()
+
+if not raw_holder.isdigit():
+    continue
+
+holders = int(raw_holder)
 
                 cached_holders = holders
                 last_holder_refresh = now
