@@ -291,7 +291,7 @@ def get_holder_count() -> Optional[int]:
             r'([\d,]+)</div>\s*<div[^>]*>\s*holders',
         ]
 
-        for pattern in patterns:
+for pattern in patterns:
     m = re.search(pattern, html, re.IGNORECASE)
 
     if not m:
@@ -307,7 +307,10 @@ def get_holder_count() -> Optional[int]:
     cached_holders = holders
     last_holder_refresh = now
 
-    logger.info("Holders BaseScan scrape ile alındı: %s", holders)
+    logger.info(
+        "Holders BaseScan scrape ile alındı: %s",
+        holders,
+    )
 
     return holders
         logger.warning("BaseScan holders scrape pattern bulunamadı.")
