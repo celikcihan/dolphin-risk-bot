@@ -17,7 +17,6 @@ import requests
 
 DEX_BASE = "https://api.dexscreener.com"
 TG_BASE = "https://api.telegram.org"
-ETHERSCAN_V2_BASE = "https://api.etherscan.io/v2/api"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
@@ -26,16 +25,13 @@ SELL_CHANNEL_ID = os.getenv("SELL_CHANNEL_ID", CHANNEL_ID)
 PROJECT_NAME = os.getenv("PROJECT_NAME", "IRVUS")
 
 CHAIN = os.getenv("CHAIN", "base")
-CHAIN_ID = int(os.getenv("CHAIN_ID", "8453"))
 BASE_RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
 
 TOKEN_ADDRESS = os.getenv("TOKEN_ADDRESS", "").lower()
 TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "18"))
 
-ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
-HOLDERS_COUNT = os.getenv("HOLDERS_COUNT", "")
-
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "90"))
+
 MIN_BUY_ALERT_USD = float(os.getenv("MIN_BUY_ALERT_USD", "1"))
 MIN_SELL_ALERT_USD = float(os.getenv("MIN_SELL_ALERT_USD", "1"))
 
@@ -43,11 +39,14 @@ BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "3000"))
 PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "600"))
 HOLDER_REFRESH_SECONDS = int(os.getenv("HOLDER_REFRESH_SECONDS", "1800"))
 
+HOLDERS_COUNT = os.getenv("HOLDERS_COUNT", "0")
+
 DEFAULT_DEX_ADDRESSES = [
     "0x000000000004444c5dc75cb358380d2e3de08a90",
 ]
 
 DEX_ADDRESSES_ENV = os.getenv("DEX_ADDRESSES", "")
+
 if DEX_ADDRESSES_ENV.strip():
     DEX_ADDRESSES = {
         x.strip().lower()
@@ -73,10 +72,13 @@ logging.basicConfig(
 logger = logging.getLogger("irvus-buy-sell-bot")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/3.0"})
+session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/4.0"})
+
 
 seen_hashes: Set[str] = set()
+
 cached_pair: Optional[Dict[str, Any]] = None
+
 last_checked_block: Optional[int] = None
 last_price_refresh = 0.0
 
@@ -85,6 +87,7 @@ last_holder_refresh = 0.0
 
 
 def rpc_call(method: str, params: list[Any]) -> Any:
+
     payload = {
         "jsonrpc": "2.0",
         "id": int(time.time() * 1000),
@@ -116,6 +119,7 @@ def normalize_topic_address(topic: str) -> str:
 
 
 def fmt_money(v: Optional[float]) -> str:
+
     if v is None:
         return "n/a"
 
@@ -126,6 +130,7 @@ def fmt_money(v: Optional[float]) -> str:
 
 
 def fmt_number(v: Optional[float]) -> str:
+
     if v is None:
         return "n/a"
 
@@ -139,6 +144,7 @@ def fmt_number(v: Optional[float]) -> str:
 
 
 def short_wallet(addr: str) -> str:
+
     if not addr:
         return "n/a"
 
@@ -146,6 +152,7 @@ def short_wallet(addr: str) -> str:
 
 
 def send_telegram(text: str, chat_id: str) -> None:
+
     url = f"{TG_BASE}/bot{BOT_TOKEN}/sendMessage"
 
     payload = {
@@ -159,11 +166,14 @@ def send_telegram(text: str, chat_id: str) -> None:
 
 
 def get_latest_block() -> int:
+
     result = rpc_call("eth_blockNumber", [])
+
     return hex_to_int(result)
 
 
 def get_token_pairs() -> List[Dict[str, Any]]:
+
     url = f"{DEX_BASE}/token-pairs/v1/{CHAIN}/{TOKEN_ADDRESS}"
 
     r = session.get(url, timeout=20)
@@ -177,34 +187,24 @@ def get_token_pairs() -> List[Dict[str, Any]]:
     return data.get("pairs", []) or []
 
 
-def get_pair_by_address(pair_address: str) -> Optional[Dict[str, Any]]:
-    url = f"{DEX_BASE}/latest/dex/pairs/{CHAIN}/{pair_address}"
-
-    r = session.get(url, timeout=20)
-    r.raise_for_status()
-
-    data = r.json()
-    pairs = data.get("pairs") or []
-
-    if not pairs:
-        return None
-
-    return pairs[0]
-
-
 def choose_best_pair(pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
+
     if not pairs:
         raise ValueError("DexScreener pair bulunamadı.")
 
     def score(p: Dict[str, Any]) -> float:
+
         liq = float((p.get("liquidity") or {}).get("usd") or 0)
+
         vol = float((p.get("volume") or {}).get("h24") or 0)
+
         return liq * 1000 + vol
 
     return sorted(pairs, key=score, reverse=True)[0]
 
 
 def get_pair() -> Dict[str, Any]:
+
     global cached_pair
 
     if cached_pair:
@@ -227,6 +227,7 @@ def get_pair() -> Dict[str, Any]:
 
 
 def refresh_pair() -> Dict[str, Any]:
+
     global cached_pair
     global last_price_refresh
 
@@ -236,42 +237,39 @@ def refresh_pair() -> Dict[str, Any]:
         return cached_pair
 
     try:
-        if cached_pair and cached_pair.get("pairAddress"):
-            pair = get_pair_by_address(str(cached_pair["pairAddress"]).lower())
-        else:
-            pair = get_pair()
 
-        if pair:
-            cached_pair = pair
-            last_price_refresh = now
+        pair = get_pair()
 
-            logger.info("Pair price yenilendi.")
+        cached_pair = pair
 
-            return pair
+        last_price_refresh = now
 
-    except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 429:
-            logger.warning("DexScreener rate limit. Cached pair kullanılacak.")
+        return pair
 
-            if cached_pair:
-                return cached_pair
+    except Exception as e:
+
+        logger.warning("Pair refresh hata: %s", e)
+
+        if cached_pair:
+            return cached_pair
 
         raise
 
-    return cached_pair or get_pair()
-
 
 def get_holder_count() -> Optional[int]:
+
     global cached_holders
     global last_holder_refresh
 
     now = time.time()
 
-    if cached_holders is not None and (now - last_holder_refresh < HOLDER_REFRESH_SECONDS):
+    if cached_holders is not None and (
+        now - last_holder_refresh < HOLDER_REFRESH_SECONDS
+    ):
         return cached_holders
 
-    # BaseScan scrape
     try:
+
         url = f"https://basescan.org/token/{TOKEN_ADDRESS}"
 
         headers = {
@@ -280,6 +278,7 @@ def get_holder_count() -> Optional[int]:
         }
 
         r = session.get(url, headers=headers, timeout=20)
+
         r.raise_for_status()
 
         html = r.text
@@ -287,77 +286,63 @@ def get_holder_count() -> Optional[int]:
         patterns = [
             r'([\d,]+)\s+holders',
             r'([\d,]+)\s+Holders',
-            r'Holder[s]?</div>\s*<div[^>]*>\s*([\d,]+)',
-            r'([\d,]+)</div>\s*<div[^>]*>\s*holders',
         ]
 
-for pattern in patterns:
-    m = re.search(pattern, html, re.IGNORECASE)
+        for pattern in patterns:
 
-    if not m:
-        continue
+            m = re.search(pattern, html, re.IGNORECASE)
 
-    raw_holder = (m.group(1) or "").replace(",", "").strip()
+            if not m:
+                continue
 
-    if not raw_holder.isdigit():
-        continue
+            raw_holder = (
+                m.group(1)
+                .replace(",", "")
+                .strip()
+            )
 
-    holders = int(raw_holder)
+            if not raw_holder.isdigit():
+                continue
 
-    cached_holders = holders
-    last_holder_refresh = now
+            holders = int(raw_holder)
 
-    logger.info(
-        "Holders BaseScan scrape ile alındı: %s",
-        holders,
-    )
+            cached_holders = holders
 
-    return holders
-        logger.warning("BaseScan holders scrape pattern bulunamadı.")
-
-    except Exception as e:
-        logger.warning("BaseScan holders scrape hata: %s", e)
-
-    # API fallback
-    if ETHERSCAN_API_KEY:
-        try:
-            params = {
-                "chainid": CHAIN_ID,
-                "module": "token",
-                "action": "tokenholdercount",
-                "contractaddress": TOKEN_ADDRESS,
-                "apikey": ETHERSCAN_API_KEY,
-            }
-
-            r = session.get(ETHERSCAN_V2_BASE, params=params, timeout=20)
-            r.raise_for_status()
-
-            data = r.json()
-
-            if str(data.get("status")) == "1":
-                cached_holders = int(data.get("result"))
-                last_holder_refresh = now
-
-                return cached_holders
-
-        except Exception as e:
-            logger.warning("Holder API hata: %s", e)
-
-    # Manual fallback
-    if HOLDERS_COUNT.strip():
-        try:
-            cached_holders = int(float(HOLDERS_COUNT.strip()))
             last_holder_refresh = now
 
-            return cached_holders
+            logger.info(
+                "Holders scrape başarılı: %s",
+                holders,
+            )
 
-        except Exception:
-            pass
+            return holders
 
-    return cached_holders
+    except Exception as e:
+
+        logger.warning(
+            "BaseScan holders scrape hata: %s",
+            e,
+        )
+
+    try:
+
+        fallback = int(HOLDERS_COUNT)
+
+        cached_holders = fallback
+
+        last_holder_refresh = now
+
+        return fallback
+
+    except Exception:
+        return None
 
 
-def get_all_transfer_logs(from_block: int, to_block: int) -> List[Dict[str, Any]]:
+def get_all_transfer_logs(
+    from_block: int,
+    to_block: int,
+) -> List[Dict[str, Any]]:
+
     params = {
         "fromBlock": int_to_hex(from_block),
         "toBlock": int_to_hex(to_block),
@@ -375,16 +360,21 @@ def get_all_transfer_logs(from_block: int, to_block: int) -> List[Dict[str, Any]
     return result
 
 
-def decode_transfer_log(log: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def decode_transfer_log(
+    log: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+
     topics = log.get("topics") or []
 
     if len(topics) < 3:
         return None
 
     from_addr = normalize_topic_address(topics[1])
+
     to_addr = normalize_topic_address(topics[2])
 
     raw_value_hex = log.get("data", "0x0")
+
     raw_value = hex_to_int(raw_value_hex)
 
     token_amount = raw_value / (10 ** TOKEN_DECIMALS)
@@ -396,30 +386,53 @@ def decode_transfer_log(log: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "from": from_addr,
         "to": to_addr,
         "token_amount": token_amount,
-        "block_number": hex_to_int(log.get("blockNumber", "0x0")),
     }
 
 
-def classify_transfer(transfer: Dict[str, Any]) -> Optional[str]:
-    from_addr = str(transfer.get("from", "")).lower()
-    to_addr = str(transfer.get("to", "")).lower()
+def classify_transfer(
+    transfer: Dict[str, Any],
+) -> Optional[str]:
 
-    if from_addr in IGNORE_ADDRESSES or to_addr in IGNORE_ADDRESSES:
+    from_addr = str(
+        transfer.get("from", "")
+    ).lower()
+
+    to_addr = str(
+        transfer.get("to", "")
+    ).lower()
+
+    if (
+        from_addr in IGNORE_ADDRESSES
+        or to_addr in IGNORE_ADDRESSES
+    ):
         return None
 
-    if from_addr in DEX_ADDRESSES and to_addr not in DEX_ADDRESSES:
+    if (
+        from_addr in DEX_ADDRESSES
+        and to_addr not in DEX_ADDRESSES
+    ):
         return "buy"
 
-    if to_addr in DEX_ADDRESSES and from_addr not in DEX_ADDRESSES:
+    if (
+        to_addr in DEX_ADDRESSES
+        and from_addr not in DEX_ADDRESSES
+    ):
         return "sell"
 
     return None
 
 
-def get_wallet_token_balance(wallet: str) -> Optional[float]:
+def get_wallet_token_balance(
+    wallet: str,
+) -> Optional[float]:
+
     selector = "0x70a08231"
 
-    wallet_clean = wallet.lower().replace("0x", "").rjust(64, "0")
+    wallet_clean = (
+        wallet.lower()
+        .replace("0x", "")
+        .rjust(64, "0")
+    )
 
     data = selector + wallet_clean
 
@@ -429,14 +442,22 @@ def get_wallet_token_balance(wallet: str) -> Optional[float]:
     }
 
     try:
-        result = rpc_call("eth_call", [call_obj, "latest"])
+
+        result = rpc_call(
+            "eth_call",
+            [call_obj, "latest"],
+        )
 
         raw = hex_to_int(result)
 
         return raw / (10 ** TOKEN_DECIMALS)
 
     except Exception as e:
-        logger.warning("Wallet balance alınamadı: %s", e)
+
+        logger.warning(
+            "Wallet balance alınamadı: %s",
+            e,
+        )
 
         return None
 
@@ -450,81 +471,118 @@ def build_message(
 ) -> str:
 
     base = pair.get("baseToken") or {}
+
     quote = pair.get("quoteToken") or {}
 
     base_symbol = base.get("symbol", PROJECT_NAME)
+
     quote_symbol = quote.get("symbol", "ETH")
 
     dex_id = pair.get("dexId", "DEX")
+
     chart_url = pair.get("url", "")
 
     price_usd = float(pair.get("priceUsd") or 0)
+
     price_native = float(pair.get("priceNative") or 0)
 
-    liquidity_usd = (pair.get("liquidity") or {}).get("usd")
+    liquidity_usd = (
+        pair.get("liquidity") or {}
+    ).get("usd")
+
     market_cap = pair.get("marketCap")
 
     tx_hash = transfer.get("tx_hash", "")
-    token_amount = float(transfer.get("token_amount") or 0)
 
-    wallet = transfer["to"] if event_type == "buy" else transfer["from"]
+    token_amount = float(
+        transfer.get("token_amount") or 0
+    )
+
+    wallet = (
+        transfer["to"]
+        if event_type == "buy"
+        else transfer["from"]
+    )
 
     usd_value = token_amount * price_usd
+
     quote_amount = token_amount * price_native
-
-    wallet_value = None
-
-    if wallet_balance is not None:
-        wallet_value = wallet_balance * price_usd
 
     lines: List[str] = []
 
     if event_type == "buy":
+
         lines.append(f"🟢 {PROJECT_NAME} BUY!")
+
         lines.append("")
-        lines.append("✅ New Buy Detected")
-        lines.append("")
+
         lines.append(
-            f"💵 Spent Est.: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
+            f"💵 Spent: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
         )
-        lines.append(f"🪙 Got: {fmt_number(token_amount)} {base_symbol}")
-        lines.append("")
-        lines.append(f"📈 Buy Price: {fmt_money(price_usd)}")
+
+        lines.append(
+            f"🪙 Got: {fmt_number(token_amount)} {base_symbol}"
+        )
+
+        lines.append(
+            f"📈 Price: {fmt_money(price_usd)}"
+        )
 
     else:
+
         lines.append(f"🔴 {PROJECT_NAME} SELL!")
+
         lines.append("")
-        lines.append("⚠️ New Sell Detected")
-        lines.append("")
-        lines.append(f"🪙 Sold: {fmt_number(token_amount)} {base_symbol}")
+
         lines.append(
-            f"💰 Received Est.: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
+            f"🪙 Sold: {fmt_number(token_amount)} {base_symbol}"
         )
-        lines.append("")
-        lines.append(f"📉 Sell Price: {fmt_money(price_usd)}")
+
+        lines.append(
+            f"💰 Value: {quote_amount:,.6f} {quote_symbol} ({fmt_money(usd_value)})"
+        )
+
+        lines.append(
+            f"📉 Price: {fmt_money(price_usd)}"
+        )
 
     if wallet_balance is not None:
-        lines.append(
-            f"👤 Wallet Holdings: {fmt_number(wallet_balance)} {base_symbol} ({fmt_money(wallet_value)})"
-        )
 
-    lines.append(f"🏪 DEX: {dex_id}")
+        wallet_value = wallet_balance * price_usd
+
+        lines.append(
+            f"👤 Holdings: {fmt_number(wallet_balance)} {base_symbol} ({fmt_money(wallet_value)})"
+        )
 
     if holders is not None:
         lines.append(f"👥 Holders: {holders:,}")
 
+    lines.append(f"🏪 DEX: {dex_id}")
+
     if liquidity_usd is not None:
-        lines.append(f"💧 Liquidity: {fmt_money(float(liquidity_usd))}")
+        lines.append(
+            f"💧 Liquidity: {fmt_money(float(liquidity_usd))}"
+        )
 
     if market_cap is not None:
-        lines.append(f"🏦 Market Cap: {fmt_money(float(market_cap))}")
+        lines.append(
+            f"🏦 Market Cap: {fmt_money(float(market_cap))}"
+        )
 
     lines.append("")
-    lines.append(f"👛 Wallet: {short_wallet(wallet)}")
-    lines.append(f"🔗 TX: https://basescan.org/tx/{tx_hash}")
+
+    lines.append(
+        f"👛 Wallet: {short_wallet(wallet)}"
+    )
+
+    lines.append(
+        f"🔗 TX: https://basescan.org/tx/{tx_hash}"
+    )
 
     if chart_url:
-        lines.append(f"📊 Chart: {chart_url}")
+        lines.append(
+            f"📊 Chart: {chart_url}"
+        )
 
     return "\n".join(lines)
 
@@ -535,17 +593,19 @@ def process_transfers(
     holders: Optional[int],
 ) -> None:
 
-    unknown_count = 0
-
     grouped: Dict[str, List[Dict[str, Any]]] = {}
 
     for transfer in transfers:
+
         tx_hash = transfer.get("tx_hash")
 
         if not tx_hash:
             continue
 
-        grouped.setdefault(tx_hash, []).append(transfer)
+        grouped.setdefault(
+            tx_hash,
+            [],
+        ).append(transfer)
 
     for tx_hash, tx_transfers in grouped.items():
 
@@ -559,59 +619,77 @@ def process_transfers(
             event_type = classify_transfer(transfer)
 
             if event_type is None:
-                unknown_count += 1
-
-                if unknown_count <= 5:
-                    logger.info(
-                        "UNKNOWN transfer | from=%s | to=%s | amount=%s | tx=%s",
-                        transfer.get("from"),
-                        transfer.get("to"),
-                        fmt_number(float(transfer.get("token_amount") or 0)),
-                        tx_hash,
-                    )
-
                 continue
 
-            classified_items.append((event_type, transfer))
+            classified_items.append(
+                (event_type, transfer)
+            )
 
         if not classified_items:
             continue
 
-        buy_items = [item for item in classified_items if item[0] == "buy"]
-        sell_items = [item for item in classified_items if item[0] == "sell"]
+        buy_items = [
+            item
+            for item in classified_items
+            if item[0] == "buy"
+        ]
+
+        sell_items = [
+            item
+            for item in classified_items
+            if item[0] == "sell"
+        ]
 
         if buy_items:
+
             event_type, selected_transfer = max(
                 buy_items,
-                key=lambda x: float(x[1].get("token_amount") or 0),
+                key=lambda x: float(
+                    x[1].get("token_amount") or 0
+                ),
             )
 
         elif sell_items:
+
             event_type, selected_transfer = max(
                 sell_items,
-                key=lambda x: float(x[1].get("token_amount") or 0),
+                key=lambda x: float(
+                    x[1].get("token_amount") or 0
+                ),
             )
 
         else:
             continue
 
-        token_amount = float(selected_transfer.get("token_amount") or 0)
+        token_amount = float(
+            selected_transfer.get("token_amount") or 0
+        )
 
-        price_usd = float(pair.get("priceUsd") or 0)
+        price_usd = float(
+            pair.get("priceUsd") or 0
+        )
 
         usd_value = token_amount * price_usd
 
-        if event_type == "buy" and usd_value < MIN_BUY_ALERT_USD:
-            logger.info("Buy küçük geçti: %s", fmt_money(usd_value))
+        if (
+            event_type == "buy"
+            and usd_value < MIN_BUY_ALERT_USD
+        ):
             seen_hashes.add(tx_hash)
             continue
 
-        if event_type == "sell" and usd_value < MIN_SELL_ALERT_USD:
-            logger.info("Sell küçük geçti: %s", fmt_money(usd_value))
+        if (
+            event_type == "sell"
+            and usd_value < MIN_SELL_ALERT_USD
+        ):
             seen_hashes.add(tx_hash)
             continue
 
-        wallet = selected_transfer["to"] if event_type == "buy" else selected_transfer["from"]
+        wallet = (
+            selected_transfer["to"]
+            if event_type == "buy"
+            else selected_transfer["from"]
+        )
 
         wallet_balance = get_wallet_token_balance(wallet)
 
@@ -624,26 +702,46 @@ def process_transfers(
         )
 
         if event_type == "buy":
-            send_telegram(msg, CHANNEL_ID)
-            logger.info("BUY alert gönderildi: %s", tx_hash)
+
+            send_telegram(
+                msg,
+                CHANNEL_ID,
+            )
+
+            logger.info(
+                "BUY alert gönderildi: %s",
+                tx_hash,
+            )
 
         else:
-            send_telegram(msg, SELL_CHANNEL_ID)
-            logger.info("SELL alert gönderildi: %s", tx_hash)
+
+            send_telegram(
+                msg,
+                SELL_CHANNEL_ID,
+            )
+
+            logger.info(
+                "SELL alert gönderildi: %s",
+                tx_hash,
+            )
 
         seen_hashes.add(tx_hash)
 
-    if unknown_count:
-        logger.info("UNKNOWN transfer sayısı: %s", unknown_count)
-
 
 def main() -> None:
+
     global last_checked_block
     global cached_pair
     global last_price_refresh
 
-    logger.info("IRVUS BUY/SELL BOT RPC başladı.")
-    logger.info("DEX adresleri: %s", ",".join(sorted(DEX_ADDRESSES)))
+    logger.info(
+        "IRVUS BUY/SELL BOT RPC başladı."
+    )
+
+    logger.info(
+        "DEX adresleri: %s",
+        ",".join(sorted(DEX_ADDRESSES)),
+    )
 
     pair = get_pair()
 
@@ -651,20 +749,29 @@ def main() -> None:
 
     last_price_refresh = time.time()
 
-    logger.info("DexScreener pair id: %s", pair.get("pairAddress"))
-
     latest_block = get_latest_block()
 
-    last_checked_block = max(latest_block - BLOCK_LOOKBACK, 0)
+    last_checked_block = max(
+        latest_block - BLOCK_LOOKBACK,
+        0,
+    )
 
-    logger.info("Başlangıç block: %s", last_checked_block)
+    logger.info(
+        "Başlangıç block: %s",
+        last_checked_block,
+    )
 
     while True:
+
         try:
 
             latest_block = get_latest_block()
 
-            from_block = (last_checked_block or latest_block) + 1
+            from_block = (
+                (last_checked_block or latest_block)
+                + 1
+            )
+
             to_block = latest_block
 
             logger.info(
@@ -675,12 +782,12 @@ def main() -> None:
             )
 
             if from_block > to_block:
+
                 time.sleep(CHECK_INTERVAL)
+
                 continue
 
             pair = refresh_pair()
-
-            cached_pair = pair
 
             holders = get_holder_count()
 
@@ -692,6 +799,7 @@ def main() -> None:
             transfers: List[Dict[str, Any]] = []
 
             for log in logs:
+
                 decoded = decode_transfer_log(log)
 
                 if decoded:
@@ -716,7 +824,11 @@ def main() -> None:
                 seen_hashes.clear()
 
         except Exception as e:
-            logger.exception("BUY/SELL BOT hata verdi: %s", e)
+
+            logger.exception(
+                "BUY/SELL BOT hata verdi: %s",
+                e,
+            )
 
         time.sleep(CHECK_INTERVAL)
 
