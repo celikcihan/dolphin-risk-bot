@@ -37,9 +37,19 @@ CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "90"))
 MIN_BUY_ALERT_USD = float(os.getenv("MIN_BUY_ALERT_USD", "1"))
 MIN_SELL_ALERT_USD = float(os.getenv("MIN_SELL_ALERT_USD", "1"))
 
-BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "8000"))
+BLOCK_LOOKBACK = int(os.getenv("BLOCK_LOOKBACK", "3000"))
+MAX_BLOCK_RANGE = int(os.getenv("MAX_BLOCK_RANGE", "500"))
+CATCH_UP_MAX_BLOCKS = int(os.getenv("CATCH_UP_MAX_BLOCKS", "3000"))
+
 PRICE_REFRESH_SECONDS = int(os.getenv("PRICE_REFRESH_SECONDS", "600"))
 HOLDER_REFRESH_SECONDS = int(os.getenv("HOLDER_REFRESH_SECONDS", "1800"))
+
+# Logo / media. BUY_MEDIA_URL and SELL_MEDIA_URL can be public HTTPS URL or Telegram file_id.
+# BUY_MEDIA_MODE / SELL_MEDIA_MODE: text, photo, animation
+BUY_MEDIA_URL = os.getenv("BUY_MEDIA_URL", "")
+SELL_MEDIA_URL = os.getenv("SELL_MEDIA_URL", "")
+BUY_MEDIA_MODE = os.getenv("BUY_MEDIA_MODE", "photo").lower()
+SELL_MEDIA_MODE = os.getenv("SELL_MEDIA_MODE", "photo").lower()
 
 DEX_ADDRESSES_ENV = os.getenv(
     "DEX_ADDRESSES",
@@ -67,7 +77,7 @@ logging.basicConfig(
 logger = logging.getLogger("irvus-buy-sell-bot")
 
 session = requests.Session()
-session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/7.0"})
+session.headers.update({"User-Agent": "IRVUS-BUY-SELL-BOT/8.1-STABLE"})
 
 seen_hashes: Set[str] = set()
 cached_pair: Optional[Dict[str, Any]] = None
@@ -137,13 +147,42 @@ def short_wallet(addr: str) -> str:
     return f"{addr[:6]}...{addr[-4:]}"
 
 
-def send_telegram(text: str, chat_id: str) -> None:
+def tg_post(method: str, payload: Dict[str, Any]) -> None:
+    url = f"{TG_BASE}/bot{BOT_TOKEN}/{method}"
+    r = session.post(url, json=payload, timeout=30)
+    r.raise_for_status()
+
+
+def send_telegram(text: str, chat_id: str, event_type: str) -> None:
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN boş.")
     if not chat_id:
         raise ValueError("CHANNEL_ID boş.")
 
-    url = f"{TG_BASE}/bot{BOT_TOKEN}/sendMessage"
+    media_url = BUY_MEDIA_URL if event_type == "buy" else SELL_MEDIA_URL
+    media_mode = BUY_MEDIA_MODE if event_type == "buy" else SELL_MEDIA_MODE
+
+    if media_url and media_mode in {"photo", "image"}:
+        payload = {
+            "chat_id": chat_id,
+            "photo": media_url,
+            "caption": text,
+            "disable_web_page_preview": True,
+            "parse_mode": "Markdown",
+        }
+        tg_post("sendPhoto", payload)
+        return
+
+    if media_url and media_mode in {"animation", "gif"}:
+        payload = {
+            "chat_id": chat_id,
+            "animation": media_url,
+            "caption": text,
+            "disable_web_page_preview": True,
+            "parse_mode": "Markdown",
+        }
+        tg_post("sendAnimation", payload)
+        return
 
     payload = {
         "chat_id": chat_id,
@@ -151,9 +190,7 @@ def send_telegram(text: str, chat_id: str) -> None:
         "disable_web_page_preview": True,
         "parse_mode": "Markdown",
     }
-
-    r = session.post(url, json=payload, timeout=20)
-    r.raise_for_status()
+    tg_post("sendMessage", payload)
 
 
 def get_latest_block() -> int:
@@ -303,7 +340,7 @@ def get_holder_count() -> Optional[int]:
     return cached_holders
 
 
-def get_all_transfer_logs(from_block: int, to_block: int) -> List[Dict[str, Any]]:
+def get_all_transfer_logs_single(from_block: int, to_block: int) -> List[Dict[str, Any]]:
     params = {
         "fromBlock": int_to_hex(from_block),
         "toBlock": int_to_hex(to_block),
@@ -317,6 +354,40 @@ def get_all_transfer_logs(from_block: int, to_block: int) -> List[Dict[str, Any]
         return []
 
     return result
+
+
+def get_all_transfer_logs_chunked(from_block: int, to_block: int) -> List[Dict[str, Any]]:
+    all_logs: List[Dict[str, Any]] = []
+    cursor = from_block
+
+    while cursor <= to_block:
+        chunk_to = min(cursor + MAX_BLOCK_RANGE - 1, to_block)
+
+        try:
+            logs = get_all_transfer_logs_single(cursor, chunk_to)
+            all_logs.extend(logs)
+
+            logger.info(
+                "Chunk tarandı: %s -> %s | log=%s",
+                cursor,
+                chunk_to,
+                len(logs),
+            )
+
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code in {413, 429}:
+                logger.warning(
+                    "RPC limit/hata. Chunk atlandı: %s -> %s | status=%s",
+                    cursor,
+                    chunk_to,
+                    e.response.status_code,
+                )
+            else:
+                raise
+
+        cursor = chunk_to + 1
+
+    return all_logs
 
 
 def decode_transfer_log(log: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -365,10 +436,6 @@ def find_real_wallet(
     event_type: str,
     selected_transfer: Dict[str, Any],
 ) -> str:
-    """
-    BUY işleminde ara route contract'ı yerine final alıcıyı seçer.
-    SELL işleminde DEX tarafına token gönderen kullanıcıyı seçer.
-    """
     if event_type == "buy":
         candidates = []
 
@@ -391,7 +458,6 @@ def find_real_wallet(
                 }
             )
 
-        # Ara route kontratından sonra giden final alıcıyı tercih et
         final_candidates = [
             c for c in candidates
             if not c["from_is_dex"]
@@ -405,7 +471,6 @@ def find_real_wallet(
 
         return str(selected_transfer.get("to", "")).lower()
 
-    # SELL
     candidates = []
 
     for t in tx_transfers:
@@ -621,10 +686,10 @@ def process_transfers(
         )
 
         if event_type == "buy":
-            send_telegram(msg, CHANNEL_ID)
+            send_telegram(msg, CHANNEL_ID, "buy")
             logger.info("BUY alert gönderildi: %s", tx_hash)
         else:
-            send_telegram(msg, SELL_CHANNEL_ID)
+            send_telegram(msg, SELL_CHANNEL_ID, "sell")
             logger.info("SELL alert gönderildi: %s", tx_hash)
 
         seen_hashes.add(tx_hash)
@@ -636,7 +701,7 @@ def main() -> None:
     global last_price_refresh
 
     logger.info("IRVUS BUY/SELL BOT RPC başladı.")
-    logger.info("Bot version: IRVUS-BUY-SELL-BOT/7.0")
+    logger.info("Bot version: IRVUS-BUY-SELL-BOT/8.1-STABLE")
     logger.info("DEX adresleri: %s", ",".join(sorted(DEX_ADDRESSES)))
 
     pair = get_pair()
@@ -655,6 +720,16 @@ def main() -> None:
             from_block = (last_checked_block or latest_block) + 1
             to_block = latest_block
 
+            lag = to_block - from_block + 1
+
+            if lag > CATCH_UP_MAX_BLOCKS:
+                from_block = max(to_block - CATCH_UP_MAX_BLOCKS + 1, 0)
+                logger.warning(
+                    "Çok büyük backlog kısaltıldı. Yeni aralık: %s -> %s",
+                    from_block,
+                    to_block,
+                )
+
             logger.info(
                 "Loop | latest_block=%s | from=%s | to=%s",
                 latest_block,
@@ -669,7 +744,7 @@ def main() -> None:
             pair = refresh_pair()
             holders = get_holder_count()
 
-            logs = get_all_transfer_logs(
+            logs = get_all_transfer_logs_chunked(
                 from_block=from_block,
                 to_block=to_block,
             )
@@ -702,6 +777,16 @@ def main() -> None:
 
         except Exception as e:
             logger.exception("BUY/SELL BOT hata verdi: %s", e)
+
+            try:
+                latest_block = get_latest_block()
+                last_checked_block = max(latest_block - CATCH_UP_MAX_BLOCKS, 0)
+                logger.warning(
+                    "Hata sonrası last_checked_block güncellendi: %s",
+                    last_checked_block,
+                )
+            except Exception:
+                pass
 
         time.sleep(CHECK_INTERVAL)
 
