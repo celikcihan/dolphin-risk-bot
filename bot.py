@@ -582,6 +582,38 @@ async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
+async def ca_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "🐬 DOLPHIN Contract Address\n\n"
+            f"`{TOKEN_ADDRESS}`\n\n"
+            "🌊 Network: Base Mainnet",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+
+async def ca_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+
+    text = msg.text.strip().lower()
+
+    ca_triggers = {
+        "ca",
+        "contract",
+        "contract address",
+        "kontrat",
+        "kontrat adresi",
+    }
+
+    if text not in ca_triggers:
+        return
+
+    await ca_command(update, context)
+
+
 async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     if not msg or not msg.new_chat_members:
@@ -628,6 +660,9 @@ async def channel_command_message(update: Update, context: ContextTypes.DEFAULT_
         "/verify": verify_command,
         "/links": links_command,
         "/about": about_command,
+        "/ca": ca_command,
+        "/contract": ca_command,
+        "/kontrat": ca_command,
         "/help": help_command,
     }
 
@@ -682,6 +717,9 @@ def main() -> None:
     app.add_handler(CommandHandler("abouttr", about_tr_command))
 
     app.add_handler(CommandHandler("chatid", chatid_command))
+    app.add_handler(CommandHandler("ca", ca_command))
+    app.add_handler(CommandHandler("contract", ca_command))
+    app.add_handler(CommandHandler("kontrat", ca_command))
 
     app.add_handler(
         MessageHandler(
@@ -694,6 +732,13 @@ def main() -> None:
         MessageHandler(
             filters.ChatType.CHANNEL & filters.TEXT,
             channel_command_message,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            ca_text_message,
         )
     )
 
