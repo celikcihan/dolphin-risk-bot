@@ -54,6 +54,12 @@ BASESCAN_SAFE = os.getenv(
     f"https://basescan.org/address/{SAFE_ADDRESS}",
 )
 
+async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if update.effective_message and chat:
+        await update.effective_message.reply_text(
+            f"Chat ID:\n{chat.id}\n\nChat Title:\n{chat.title or 'Private Chat'}"
+        )
 
 def short_addr(addr: str) -> str:
     if not addr or len(addr) < 12:
@@ -325,6 +331,7 @@ def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("chatid", chatid_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("risk", risk_command))
     app.add_handler(CommandHandler("vesting", vesting_command))
