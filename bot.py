@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import re
+import unicodedata
 import logging
 
 from telegram import Update
@@ -16,6 +18,7 @@ from telegram.ext import (
     ContextTypes,
     MessageHandler,
     filters,
+    ApplicationHandlerStop,
 )
 
 logging.basicConfig(
@@ -57,6 +60,49 @@ BASESCAN_SAFE = os.getenv(
 
 TR_GROUP_ID = int(os.getenv("TR_GROUP_ID", "0"))
 GLOBAL_GROUP_ID = int(os.getenv("GLOBAL_GROUP_ID", "0"))
+
+BAD_WORDS_RAW = os.getenv("BAD_WORDS", "")
+BAD_WORDS = [
+    word.strip()
+    for word in BAD_WORDS_RAW.split(",")
+    if word.strip()
+]
+BAD_WORD_WARN = os.getenv("BAD_WORD_WARN", "false").lower() == "true"
+BAD_WORD_WARNING_TEXT = os.getenv(
+    "BAD_WORD_WARNING_TEXT",
+    "⚠️ Please keep the chat respectful. / Lütfen sohbet dilimize dikkat edelim.",
+)
+
+
+def normalize_for_filter(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text.casefold())
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.replace("ı", "i")
+    text = re.sub(r"[^a-z0-9ğüşıöç]+", " ", text)
+    return " ".join(text.split())
+
+
+def contains_bad_word(text: str) -> bool:
+    if not BAD_WORDS:
+        return False
+
+    normalized_text = normalize_for_filter(text)
+    compact_text = normalized_text.replace(" ", "")
+
+    for word in BAD_WORDS:
+        normalized_word = normalize_for_filter(word)
+        if not normalized_word:
+            continue
+
+        compact_word = normalized_word.replace(" ", "")
+
+        if re.search(rf"(^|\s){re.escape(normalized_word)}($|\s)", normalized_text):
+            return True
+
+        if compact_word and compact_word in compact_text:
+            return True
+
+    return False
 
 
 def short_addr(addr: str) -> str:
@@ -582,6 +628,41 @@ async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
+async def moderation_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+
+    if not msg or not msg.text:
+        return
+
+    if not contains_bad_word(msg.text):
+        return
+
+    chat = update.effective_chat
+    user = update.effective_user
+
+    try:
+        await msg.delete()
+        logger.info(
+            "Filtered message deleted | chat=%s | user=%s",
+            chat.id if chat else "n/a",
+            user.id if user else "n/a",
+        )
+    except Exception as e:
+        logger.warning("Filtered message could not be deleted: %s", e)
+
+    if BAD_WORD_WARN and chat:
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=BAD_WORD_WARNING_TEXT,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.warning("Warning message could not be sent: %s", e)
+
+    raise ApplicationHandlerStop
+
+
 async def ca_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
         await update.effective_message.reply_text(
@@ -720,6 +801,14 @@ def main() -> None:
     app.add_handler(CommandHandler("ca", ca_command))
     app.add_handler(CommandHandler("contract", ca_command))
     app.add_handler(CommandHandler("kontrat", ca_command))
+
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+            moderation_message,
+        ),
+        group=-1,
+    )
 
     app.add_handler(
         MessageHandler(
