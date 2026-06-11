@@ -550,7 +550,7 @@ async def safe_tr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "Mevcut yapı:\n"
         "3 imzacı / 3 onay\n\n"
         "Amaç:\n"
-        "Treasury, ownership ve proje yönetişim güvenliği.\n\n"
+        "Treasury, ownership ve proje güvenliği.\n\n"
         f"BaseScan:\n{BASESCAN_SAFE}"
     )
     if update.effective_message:
@@ -679,7 +679,7 @@ async def about_tr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "Temel şeffaflık noktaları:\n"
         "✅ Doğrulanmış kontratlar\n"
         "✅ 200M kilitli vesting\n"
-        "✅ Safe Multisig yönetişimi\n"
+        "✅ Safe Multisig yönetimi\n"
         "✅ Sabit arz\n"
         "✅ Mint fonksiyonu yok"
     )
