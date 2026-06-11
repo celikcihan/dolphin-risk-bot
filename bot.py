@@ -10,6 +10,7 @@ import os
 import re
 import unicodedata
 import logging
+from urllib.parse import urlparse
 
 from telegram import Update
 from telegram.ext import (
@@ -73,6 +74,20 @@ BAD_WORD_WARNING_TEXT = os.getenv(
     "⚠️ Please keep the chat respectful. / Lütfen sohbet dilimize dikkat edelim.",
 )
 
+AUTO_DELETE_LINKS = os.getenv("AUTO_DELETE_LINKS", "false").lower() == "true"
+LINK_WARN = os.getenv("LINK_WARN", "false").lower() == "true"
+LINK_WARNING_TEXT = os.getenv(
+    "LINK_WARNING_TEXT",
+    "⚠️ Links are not allowed in this group. / Bu grupta link paylaşımı yasaktır.",
+)
+ALLOWED_LINK_DOMAINS_RAW = os.getenv("ALLOWED_LINK_DOMAINS", "")
+ALLOWED_LINK_DOMAINS = {
+    domain.strip().casefold().removeprefix("www.")
+    for domain in ALLOWED_LINK_DOMAINS_RAW.split(",")
+    if domain.strip()
+}
+URL_REGEX = re.compile(r"(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)", re.IGNORECASE)
+
 
 def normalize_for_filter(text: str) -> str:
     text = unicodedata.normalize("NFKD", text.casefold())
@@ -103,6 +118,58 @@ def contains_bad_word(text: str) -> bool:
             return True
 
     return False
+
+
+def extract_link_domains(text: str) -> set[str]:
+    domains: set[str] = set()
+
+    for match in URL_REGEX.findall(text or ""):
+        raw = match.strip().rstrip(".,);]")
+        url = raw if raw.startswith(("http://", "https://")) else f"https://{raw}"
+
+        try:
+            domain = urlparse(url).netloc.casefold().removeprefix("www.")
+            if domain:
+                domains.add(domain)
+        except Exception:
+            continue
+
+    return domains
+
+
+def contains_blocked_link(text: str) -> bool:
+    if not AUTO_DELETE_LINKS:
+        return False
+
+    domains = extract_link_domains(text)
+
+    if not domains:
+        return False
+
+    if not ALLOWED_LINK_DOMAINS:
+        return True
+
+    for domain in domains:
+        allowed = any(domain == allowed_domain or domain.endswith(f".{allowed_domain}") for allowed_domain in ALLOWED_LINK_DOMAINS)
+        if not allowed:
+            return True
+
+    return False
+
+
+async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not chat or not user:
+        return False
+
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        return member.status in {"administrator", "creator"}
+    except Exception as e:
+        logger.warning("Admin check failed: %s", e)
+        return False
 
 
 def short_addr(addr: str) -> str:
@@ -634,7 +701,23 @@ async def moderation_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not msg or not msg.text:
         return
 
-    if not contains_bad_word(msg.text):
+    if await is_user_admin(update, context):
+        return
+
+    delete_reason = None
+    warning_enabled = False
+    warning_text = ""
+
+    if contains_bad_word(msg.text):
+        delete_reason = "bad_word"
+        warning_enabled = BAD_WORD_WARN
+        warning_text = BAD_WORD_WARNING_TEXT
+    elif contains_blocked_link(msg.text):
+        delete_reason = "link"
+        warning_enabled = LINK_WARN
+        warning_text = LINK_WARNING_TEXT
+
+    if not delete_reason:
         return
 
     chat = update.effective_chat
@@ -643,18 +726,19 @@ async def moderation_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         await msg.delete()
         logger.info(
-            "Filtered message deleted | chat=%s | user=%s",
+            "Filtered message deleted | reason=%s | chat=%s | user=%s",
+            delete_reason,
             chat.id if chat else "n/a",
             user.id if user else "n/a",
         )
     except Exception as e:
         logger.warning("Filtered message could not be deleted: %s", e)
 
-    if BAD_WORD_WARN and chat:
+    if warning_enabled and chat:
         try:
             await context.bot.send_message(
                 chat_id=chat.id,
-                text=BAD_WORD_WARNING_TEXT,
+                text=warning_text,
                 disable_web_page_preview=True,
             )
         except Exception as e:
