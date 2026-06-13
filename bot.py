@@ -42,9 +42,18 @@ OWNER_ADDRESS = os.getenv("OWNER_ADDRESS", "0x556E306e0C5e9E27a59096A43ac8664C4f
 TOTAL_SUPPLY = int(os.getenv("TOTAL_SUPPLY", "499999999"))
 LOCKED_SUPPLY = int(os.getenv("LOCKED_SUPPLY", "200000000"))
 
+PAIR_ADDRESS = os.getenv("PAIR_ADDRESS", "0x5Ed3Bf18f8368785446B43bF416f5dFb34Ec3e22")
+TEAM_FINANCE_LOCK_ADDRESS = os.getenv("TEAM_FINANCE_LOCK_ADDRESS", "0x4F0Fd563BE89ec8C3e7D595bf3639128C0a7C33A")
+TEAM_FINANCE_LOCK_TX = os.getenv("TEAM_FINANCE_LOCK_TX", "0x601058e3685e1c4050844411b9eec846bc51b528c89c3170ee5074ba688e3a21")
+DEXSCREENER_PAIR = os.getenv("DEXSCREENER_PAIR", f"https://dexscreener.com/base/{PAIR_ADDRESS}")
+LP_LOCK_UNLOCK_DATE_EN = os.getenv("LP_LOCK_UNLOCK_DATE_EN", "June 13, 2028")
+LP_LOCK_UNLOCK_DATE_TR = os.getenv("LP_LOCK_UNLOCK_DATE_TR", "13 Haziran 2028")
+INITIAL_LP_DESCRIPTION_EN = os.getenv("INITIAL_LP_DESCRIPTION_EN", "100,000,000 DOLPHIN + 3,800 USDC")
+INITIAL_LP_DESCRIPTION_TR = os.getenv("INITIAL_LP_DESCRIPTION_TR", "100,000,000 DOLPHIN + 3,800 USDC")
+
 WEBSITE = os.getenv("WEBSITE", "https://dolphin-trust-dao.lovable.app/")
 TELEGRAM = os.getenv("TELEGRAM", "https://t.me/DolphinTokenTurkiye")
-X_LINK = os.getenv("X", "")
+X_LINK = os.getenv("X", "https://x.com/xdolphintoken")
 
 BASESCAN_TOKEN = os.getenv(
     "BASESCAN_TOKEN",
@@ -57,6 +66,18 @@ BASESCAN_VESTING = os.getenv(
 BASESCAN_SAFE = os.getenv(
     "BASESCAN_SAFE",
     f"https://basescan.org/address/{SAFE_ADDRESS}",
+)
+BASESCAN_PAIR = os.getenv(
+    "BASESCAN_PAIR",
+    f"https://basescan.org/address/{PAIR_ADDRESS}",
+)
+BASESCAN_LOCK = os.getenv(
+    "BASESCAN_LOCK",
+    f"https://basescan.org/address/{TEAM_FINANCE_LOCK_ADDRESS}",
+)
+BASESCAN_LOCK_TX = os.getenv(
+    "BASESCAN_LOCK_TX",
+    f"https://basescan.org/tx/{TEAM_FINANCE_LOCK_TX}",
 )
 
 TR_GROUP_ID = int(os.getenv("TR_GROUP_ID", "0"))
@@ -74,6 +95,7 @@ BAD_WORD_WARNING_TEXT = os.getenv(
     "⚠️ Please keep the chat respectful. / Lütfen sohbet dilimize dikkat edelim.",
 )
 
+MODERATION_ENABLED = os.getenv("MODERATION_ENABLED", "false").lower() == "true"
 AUTO_DELETE_LINKS = os.getenv("AUTO_DELETE_LINKS", "false").lower() == "true"
 LINK_WARN = os.getenv("LINK_WARN", "false").lower() == "true"
 LINK_WARNING_TEXT = os.getenv(
@@ -202,6 +224,7 @@ def welcome_text_en() -> str:
         "/helptr\n"
         "━━━━━━━━━━━━━━━\n\n"
         "🔒 200M Locked Vesting\n"
+        "🔐 100% LP Locked until June 13, 2028\n"
         "🛡️ 3/3 Safe Multisig\n"
         "📜 Verified Smart Contracts\n\n"
         f"Website:\n{WEBSITE}\n\n"
@@ -223,6 +246,7 @@ def welcome_text_tr() -> str:
         "/help\n"
         "━━━━━━━━━━━━━━━\n\n"
         "🔒 200M Kilitli Vesting\n"
+        "🔐 LP'nin %100'ü 13 Haziran 2028'e kadar kilitli\n"
         "🛡️ 3/3 Safe Multisig\n"
         "📜 Doğrulanmış Akıllı Kontratlar\n\n"
         f"Website:\n{WEBSITE}\n\n"
@@ -236,6 +260,7 @@ def welcome_text_bilingual() -> str:
         "Official Transparency & Information Bot.\n"
         "Resmi Şeffaflık ve Bilgilendirme Botu.\n\n"
         "🔒 200M Locked Vesting / 200M Kilitli Vesting\n"
+        "🔐 100% LP Locked until June 2028 / LP %100 kilitli\n"
         "🛡️ 3/3 Safe Multisig\n"
         "📜 Verified Smart Contracts / Doğrulanmış Kontratlar\n\n"
         "🇺🇸 English Commands:\n"
@@ -316,8 +341,9 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "✅ No blacklist\n"
         "✅ No max wallet\n"
         "✅ No max transaction\n"
-        "✅ Trading currently disabled\n"
-        "✅ Liquidity not opened yet\n\n"
+        "✅ Trading is live\n"
+        "✅ Liquidity is open on Uniswap V2\n"
+        "✅ 100% LP locked via Team Finance until June 13, 2028\n\n"
         "🔒 Locked Vesting\n"
         "Amount: 200,000,000 DOLPHIN\n"
         "Cliff: 12 months\n"
@@ -327,7 +353,10 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{SAFE_ADDRESS}\n\n"
         "📜 Token Contract\n"
         f"{TOKEN_ADDRESS}\n\n"
-        "Note: LP and trading checks will be added after liquidity is created."
+        "LP Pair:\n"
+        f"{PAIR_ADDRESS}\n\n"
+        "Team Finance Lock:\n"
+        f"{TEAM_FINANCE_LOCK_ADDRESS}"
     )
     if update.effective_message:
         await update.effective_message.reply_text(text, disable_web_page_preview=True)
@@ -344,8 +373,9 @@ async def risk_tr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "✅ Blacklist yok\n"
         "✅ Max wallet yok\n"
         "✅ Max transaction yok\n"
-        "✅ Trading şu an kapalı\n"
-        "✅ Likidite henüz açılmadı\n\n"
+        "✅ Trading açık\n"
+        "✅ Likidite Uniswap V2 üzerinde açık\n"
+        "✅ LP\'nin %100\'ü Team Finance üzerinden 13 Haziran 2028\'e kadar kilitli\n\n"
         "🔒 Kilitli Vesting\n"
         "Miktar: 200,000,000 DOLPHIN\n"
         "Cliff: 12 ay\n"
@@ -355,7 +385,10 @@ async def risk_tr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"{SAFE_ADDRESS}\n\n"
         "📜 Token Kontratı\n"
         f"{TOKEN_ADDRESS}\n\n"
-        "Not: LP ve trading kontrolleri likidite açıldıktan sonra eklenecek."
+        "LP Pair:\n"
+        f"{PAIR_ADDRESS}\n\n"
+        "Team Finance Lock:\n"
+        f"{TEAM_FINANCE_LOCK_ADDRESS}"
     )
     if update.effective_message:
         await update.effective_message.reply_text(text, disable_web_page_preview=True)
@@ -414,9 +447,12 @@ async def locked_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Locked Supply: {LOCKED_SUPPLY:,} DOLPHIN\n"
         "Locked Share: 40%\n\n"
         "Status:\n"
-        "✅ Locked in verified vesting contract\n"
-        "✅ Current releasable amount: 0 DOLPHIN\n"
-        "✅ Beneficiary: Safe Multisig"
+        "✅ 200M locked in verified vesting contract\n"
+        "✅ Current releasable vesting amount: 0 DOLPHIN\n"
+        "✅ 100% LP locked via Team Finance until June 13, 2028\n"
+        "✅ Beneficiary: Safe Multisig\n\n"
+        "LP Lock:\n"
+        f"{BASESCAN_LOCK}"
     )
     if update.effective_message:
         await update.effective_message.reply_text(text, disable_web_page_preview=True)
@@ -429,9 +465,12 @@ async def locked_tr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"Kilitli Miktar: {LOCKED_SUPPLY:,} DOLPHIN\n"
         "Kilitli Oran: %40\n\n"
         "Durum:\n"
-        "✅ Doğrulanmış vesting kontratında kilitli\n"
-        "✅ Şu an kullanılabilir miktar: 0 DOLPHIN\n"
-        "✅ Beneficiary: Safe Multisig"
+        "✅ 200M doğrulanmış vesting kontratında kilitli\n"
+        "✅ Şu an kullanılabilir vesting miktarı: 0 DOLPHIN\n"
+        "✅ LP'nin %100'ü Team Finance üzerinden 13 Haziran 2028'e kadar kilitli\n"
+        "✅ Beneficiary: Safe Multisig\n\n"
+        "LP Kilidi:\n"
+        f"{BASESCAN_LOCK}"
     )
     if update.effective_message:
         await update.effective_message.reply_text(text, disable_web_page_preview=True)
@@ -465,12 +504,15 @@ async def tokenomics_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = (
         "📊 DOLPHIN Tokenomics\n\n"
         "🔒 Locked Vesting: 200,000,000 (40%)\n"
-        "🌊 LP Reserve: 179,999,999 (36%)\n"
-        "🤝 Supporters: 45,000,000 (9%)\n"
+        "💧 Initial LP: 100,000,000 (20%)\n"
+        "🔥 Burn Reserve: 90,000,000 (18%)\n"
+        "🤝 Supporters: 40,000,000 (8%)\n"
         "👥 Team: 30,000,000 (6%)\n"
         "📢 Marketing: 20,000,000 (4%)\n"
-        "🔥 Burn Reserve: 15,000,000 (3%)\n"
-        "💻 Webmaster: 10,000,000 (2%)\n\n"
+        "💻 Webmaster: 10,000,000 (2%)\n"
+        "🧩 Operations Reserve: 9,999,999 (2%)\n\n"
+        "Initial LP opened with 100,000,000 DOLPHIN + 3,800 USDC.\n"
+        "100% of LP is locked via Team Finance until June 13, 2028.\n\n"
         "Total Supply: 499,999,999 DOLPHIN"
     )
     if update.effective_message:
@@ -481,12 +523,15 @@ async def tokenomics_tr_command(update: Update, context: ContextTypes.DEFAULT_TY
     text = (
         "📊 DOLPHIN Token Dağılımı\n\n"
         "🔒 Kilitli Vesting: 200,000,000 (%40)\n"
-        "🌊 Likidite Rezervi: 179,999,999 (%36)\n"
-        "🤝 Destekçiler: 45,000,000 (%9)\n"
+        "💧 İlk LP: 100,000,000 (%20)\n"
+        "🔥 Yakım Rezervi: 90,000,000 (%18)\n"
+        "🤝 Destekçiler: 40,000,000 (%8)\n"
         "👥 Ekip: 30,000,000 (%6)\n"
         "📢 Pazarlama: 20,000,000 (%4)\n"
-        "🔥 Yakım Rezervi: 15,000,000 (%3)\n"
-        "💻 Webmaster: 10,000,000 (%2)\n\n"
+        "💻 Webmaster: 10,000,000 (%2)\n"
+        "🧩 Operasyon Rezervi: 9,999,999 (%2)\n\n"
+        "İlk LP 100,000,000 DOLPHIN + 3,800 USDC ile açıldı.\n"
+        "LP'nin %100'ü Team Finance üzerinden 13 Haziran 2028'e kadar kilitli.\n\n"
         "Toplam Arz: 499,999,999 DOLPHIN"
     )
     if update.effective_message:
@@ -504,7 +549,13 @@ async def contracts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"{BASESCAN_VESTING}\n\n"
         "Safe Multisig:\n"
         f"{SAFE_ADDRESS}\n"
-        f"{BASESCAN_SAFE}"
+        f"{BASESCAN_SAFE}\n\n"
+        "Uniswap V2 LP Pair:\n"
+        f"{PAIR_ADDRESS}\n"
+        f"{BASESCAN_PAIR}\n\n"
+        "Team Finance LP Lock:\n"
+        f"{TEAM_FINANCE_LOCK_ADDRESS}\n"
+        f"{BASESCAN_LOCK}"
     )
     if update.effective_message:
         await update.effective_message.reply_text(text, disable_web_page_preview=True)
@@ -521,7 +572,13 @@ async def contracts_tr_command(update: Update, context: ContextTypes.DEFAULT_TYP
         f"{BASESCAN_VESTING}\n\n"
         "Safe Multisig:\n"
         f"{SAFE_ADDRESS}\n"
-        f"{BASESCAN_SAFE}"
+        f"{BASESCAN_SAFE}\n\n"
+        "Uniswap V2 LP Pair:\n"
+        f"{PAIR_ADDRESS}\n"
+        f"{BASESCAN_PAIR}\n\n"
+        "Team Finance LP Lock:\n"
+        f"{TEAM_FINANCE_LOCK_ADDRESS}\n"
+        f"{BASESCAN_LOCK}"
     )
     if update.effective_message:
         await update.effective_message.reply_text(text, disable_web_page_preview=True)
@@ -629,6 +686,8 @@ async def links_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "",
         f"Token Contract: {BASESCAN_TOKEN}",
         f"Vesting Contract: {BASESCAN_VESTING}",
+        f"DEX Screener: {DEXSCREENER_PAIR}",
+        f"Team Finance LP Lock: {BASESCAN_LOCK}",
     ])
 
     if update.effective_message:
@@ -649,6 +708,8 @@ async def links_tr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "",
         f"Token Kontratı: {BASESCAN_TOKEN}",
         f"Vesting Kontratı: {BASESCAN_VESTING}",
+        f"DEX Screener: {DEXSCREENER_PAIR}",
+        f"Team Finance LP Kilidi: {BASESCAN_LOCK}",
     ])
 
     if update.effective_message:
@@ -663,6 +724,7 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Core transparency points:\n"
         "✅ Verified contracts\n"
         "✅ 200M locked vesting\n"
+        "✅ 100% LP locked until June 13, 2028\n"
         "✅ Safe Multisig governance\n"
         "✅ Fixed supply\n"
         "✅ No mint function"
@@ -679,6 +741,7 @@ async def about_tr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "Temel şeffaflık noktaları:\n"
         "✅ Doğrulanmış kontratlar\n"
         "✅ 200M kilitli vesting\n"
+        "✅ LP'nin %100'ü 13 Haziran 2028'e kadar kilitli\n"
         "✅ Safe Multisig yönetimi\n"
         "✅ Sabit arz\n"
         "✅ Mint fonksiyonu yok"
@@ -696,6 +759,11 @@ async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def moderation_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Safety switch: moderation is disabled by default so the bot will not delete
+    # normal group messages unless MODERATION_ENABLED=true is explicitly set.
+    if not MODERATION_ENABLED:
+        return
+
     msg = update.effective_message
 
     if not msg or not msg.text:
